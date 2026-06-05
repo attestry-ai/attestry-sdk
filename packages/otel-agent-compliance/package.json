@@ -1,0 +1,46 @@
+{
+  "name": "@attestry/otel-agent-compliance",
+  "version": "0.1.1",
+  "description": "OpenTelemetry SpanProcessor that emits Attestry ABDR records for compliance record-keeping",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attestry-ai/attestry-sdk.git",
+    "directory": "packages/otel-agent-compliance"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.6.1"
+  },
+  "peerDependencies": {
+    "@opentelemetry/sdk-node": "~0.214.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/sdk-node": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

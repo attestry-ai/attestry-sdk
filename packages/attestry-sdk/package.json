@@ -1,0 +1,44 @@
+{
+  "name": "@attestry/sdk",
+  "version": "0.6.0",
+  "description": "Official TypeScript SDK for the Attestry compliance kernel \u2014 submit AI incidents, fetch decisions, query the cross-tenant pattern corpus.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attestry-ai/attestry-sdk.git",
+    "directory": "packages/attestry-sdk"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "attestry",
+    "ai-compliance",
+    "eu-ai-act",
+    "colorado-ai-act",
+    "nist-ai-rmf",
+    "iso-42001",
+    "ai-incidents",
+    "compliance-sdk"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,128 @@
+# npm publish with provenance — @attestry/sdk + @attestry/otel-agent-compliance
+# (W1 deliverable 5; roadmap :84 — GitHub Actions OIDC + Sigstore attestation).
+#
+# WHERE THIS RUNS: the PUBLIC mirror repo (attestry-ai/attestry-sdk). npm
+# provenance requires a public source repo whose URL matches each package's
+# `repository` field — the private kernel repo cannot mint it. This file rides
+# the kernel tree as the AUTHORED SOURCE of the workflow (and is byte-mirrored
+# out); on the kernel remote it is INERT — no `sdk-v*`/`otel-v*` tag is ever
+# pushed there, and without the npm secret/OIDC the worst case is a red run,
+# never a publish.
+#
+# AUTH (first publish vs steady state): npm cannot pre-configure Trusted
+# Publishing for a package name that has never been published (npm/cli#8544) —
+# the FIRST publish of each name authenticates with a founder-provisioned
+# granular automation token (NODE_AUTH_TOKEN secret); provenance is still
+# minted (the --provenance flag + the job's OIDC id-token drive Sigstore,
+# independent of the auth method). After the names exist, the founder
+# configures Trusted Publishing and the token secret can be removed — the
+# setup-node registry config then falls through to OIDC.
+#
+# GUARDS (Gate-1 audit C4): each tag routes to exactly its own package's job,
+# and a version==tag assertion hard-fails a mis-tag BEFORE anything publishes —
+# `npm publish` reads package.json, never the git tag, so an unguarded tag on a
+# pre-bump commit would otherwise publish wrong bytes immutably under a tag the
+# registry and git permanently disagree on.
+#
+# PRE-TAG GATE (Gate-1 audit C3/C5, executed BEFORE the founder pushes a tag —
+# see the W1 closeout plan §3): kernel↔mirror sha256 manifest diff EMPTY, then
+# per package `npm ci && build && test && npm pack` + tarball-manifest
+# inspection + packed-tarball smoke-install. Verification precedes
+# immutability; this workflow is the LAST gate, not the only one.
+
+name: Publish packages (npm provenance)
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+      - "otel-v*"
+
+permissions:
+  id-token: write # Sigstore provenance
+  contents: read
+
+jobs:
+  publish-sdk:
+    name: Publish @attestry/sdk
+    if: startsWith(github.ref_name, 'sdk-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/attestry-sdk
+    steps:
+      - name: Checkout (the tagged commit)
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Guard — package.json version must equal the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#sdk-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG_VERSION package.json=$PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::version/tag mismatch — refusing to publish ($TAG_VERSION != $PKG_VERSION)"
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Publish (provenance)
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-otel:
+    name: Publish @attestry/otel-agent-compliance
+    if: startsWith(github.ref_name, 'otel-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/otel-agent-compliance
+    steps:
+      - name: Checkout (the tagged commit)
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Guard — package.json version must equal the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#otel-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG_VERSION package.json=$PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::version/tag mismatch — refusing to publish ($TAG_VERSION != $PKG_VERSION)"
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Publish (provenance)
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
