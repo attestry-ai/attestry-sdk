@@ -44,7 +44,7 @@
 // standalone use.
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 
 // ─── Path resolution ────────────────────────────────────────────────────────
@@ -114,50 +114,56 @@ const KERNEL_EVIDENCE_PACK_EXPORT_ROUTE_PATH = resolve(
 );
 
 const sdkEvidencePackSource = readFileSync(SDK_EVIDENCE_PACK_PATH, "utf-8");
-const kernelEvidencePackTypesSource = readFileSync(
+
+// ─── Isolated/published-artifact guard (the "sibling-repo move") ────────────
+// In the published npm mirror the kernel monorepo is ABSENT, so the
+// five-levels-up kernel source paths above do not resolve. The drift
+// trip-wire is only meaningful inside the monorepo (where both the SDK copy
+// and the kernel original exist); when the kernel source is unavailable we
+// skip the suite cleanly so the standalone package's `npm test` passes. The
+// file header anticipated exactly this ("survives a future SDK move to a
+// sibling repo — the test would just need a different file path"). Test files
+// ship in NO package (`files: ["dist","README.md","LICENSE"]`), so this
+// guard changes nothing in the published artifact — only its in-isolation
+// test behavior. The drift protection remains fully active in the monorepo CI.
+const KERNEL_SOURCES_PRESENT = existsSync(KERNEL_EVIDENCE_PACK_TYPES_PATH);
+const describeDrift = KERNEL_SOURCES_PRESENT ? describe : describe.skip;
+const readKernelSource = (path: string): string =>
+  KERNEL_SOURCES_PRESENT ? readFileSync(path, "utf-8") : "";
+
+const kernelEvidencePackTypesSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_TYPES_PATH,
-  "utf-8",
 );
-const kernelDbSchemaSource = readFileSync(KERNEL_DB_SCHEMA_PATH, "utf-8");
-const kernelEvidencePackQueriesSource = readFileSync(
+const kernelDbSchemaSource = readKernelSource(KERNEL_DB_SCHEMA_PATH);
+const kernelEvidencePackQueriesSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_QUERIES_PATH,
-  "utf-8",
 );
-const kernelEvidencePackCreateRouteSource = readFileSync(
+const kernelEvidencePackCreateRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_CREATE_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackIdRouteSource = readFileSync(
+const kernelEvidencePackIdRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_ID_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackBundlesRouteSource = readFileSync(
+const kernelEvidencePackBundlesRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_BUNDLES_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackTransitionsSource = readFileSync(
+const kernelEvidencePackTransitionsSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_TRANSITIONS_PATH,
-  "utf-8",
 );
-const kernelEvidencePackExportSource = readFileSync(
+const kernelEvidencePackExportSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_EXPORT_PATH,
-  "utf-8",
 );
-const kernelEvidencePackSignRouteSource = readFileSync(
+const kernelEvidencePackSignRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_SIGN_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackSupersedeRouteSource = readFileSync(
+const kernelEvidencePackSupersedeRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_SUPERSEDE_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackRevokeRouteSource = readFileSync(
+const kernelEvidencePackRevokeRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_REVOKE_ROUTE_PATH,
-  "utf-8",
 );
-const kernelEvidencePackExportRouteSource = readFileSync(
+const kernelEvidencePackExportRouteSource = readKernelSource(
   KERNEL_EVIDENCE_PACK_EXPORT_ROUTE_PATH,
-  "utf-8",
 );
 
 // ─── Regex extraction helpers (mirror of kernel-side sdk-drift.test.ts) ─────
@@ -235,7 +241,7 @@ function extractAsConstArray(
 // P1.6 / AC7 — SDK ↔ kernel drift detection for evidence-pack closed enums
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("evidence-pack SDK ⇄ kernel drift detection (P1.6 / AC7)", () => {
+describeDrift("evidence-pack SDK ⇄ kernel drift detection (P1.6 / AC7)", () => {
   it("PACK_TYPES: SDK array byte-equals kernel `PACK_TYPES`", () => {
     const sdkValues = extractAsConstArray(
       sdkEvidencePackSource,
@@ -312,7 +318,7 @@ describe("evidence-pack SDK ⇄ kernel drift detection (P1.6 / AC7)", () => {
 // equality pin (above) is the strict check; these `.toContain` pins
 // are the wide trip-wire.
 
-describe("evidence-pack SDK ⇄ kernel structural drift (P1.6 R2)", () => {
+describeDrift("evidence-pack SDK ⇄ kernel structural drift (P1.6 R2)", () => {
   // ─── `create` (POST /api/v1/evidence-packs) request-body shape ─────────────
   describe("POST /api/v1/evidence-packs — request body field names", () => {
     // Kernel-side schema is the omit-derived `createPackBodySchema` in
@@ -539,7 +545,7 @@ describe("evidence-pack SDK ⇄ kernel structural drift (P1.6 R2)", () => {
 // the request-body / response / artifact / path pins are wide `.toContain`
 // trip-wires for renames or removals on either side.
 
-describe("evidence-pack SDK ⇄ kernel P1.8 lifecycle/export drift (DEV-77)", () => {
+describeDrift("evidence-pack SDK ⇄ kernel P1.8 lifecycle/export drift (DEV-77)", () => {
   // ─── EXPORT_FORMATS closed enum (strict byte-equality) ─────────────────────
   describe("EXPORT_FORMATS closed enum", () => {
     it("SDK array byte-equals kernel `EXPORT_FORMATS`", () => {
