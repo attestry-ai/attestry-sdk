@@ -9,6 +9,7 @@
 // would also hide it from the resource modules in this codebase.
 
 import { AbacPoliciesResource } from "./resources/abac-policies.js";
+import { AnnexIvResource } from "./resources/annex-iv.js";
 import { AuditLogResource } from "./resources/audit-log.js";
 import { BatchResource } from "./resources/batch.js";
 import { ChatResource } from "./resources/chat.js";
@@ -51,6 +52,8 @@ export class AttestryClient {
   // 2.0 flagship resources (the ≥0.6.0 union — W1 deliverable 5)
   readonly evidencePack: EvidencePackResource;
   readonly vision: VisionResource;
+  // Annex IV technical-file bind path (work-item C — the ≥0.7.0 surface).
+  readonly annexIv: AnnexIvResource;
 
   // Frozen at construction time; resources read this through `_request`.
   private readonly _config: ReturnType<typeof resolveClientConfig>;
@@ -70,6 +73,7 @@ export class AttestryClient {
     this.abacPolicies = new AbacPoliciesResource(this);
     this.evidencePack = new EvidencePackResource(this);
     this.vision = new VisionResource(this);
+    this.annexIv = new AnnexIvResource(this);
   }
 
   /** Internal — resources call this to dispatch HTTP requests. */

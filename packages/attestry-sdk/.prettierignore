@@ -1,0 +1,7 @@
+# Golden cross-vector fixtures (work-item C) — generated kernel-side with a
+# FIXED serialization form (`JSON.stringify(vectors, null, 2) + "\n"`) and
+# byte-identity-gated against the kernel copy. A formatter reflowing them would
+# break the byte-identity gate independent of any real drift (CR-6). NEVER
+# reformat — regenerate via the kernel gen test.
+src/annex-iv-verify/__tests__/golden-vectors.json
+src/annex-iv-verify/__tests__/hostile-fixtures.json

@@ -157,3 +157,80 @@ export {
   type AbacCompoundCondition,
   type AbacCondition,
 } from "./resources/abac-policies.js";
+
+// ─── Evidence packs (W1 deliverable 5 — the 24-symbol surface, C-D6/RD-C6) ──
+// 4 runtime-valued (EvidencePackResource + PACK_TYPES/PACK_STATUSES/EXPORT_FORMATS)
+// + 20 type-erased (17 interfaces + 3 types) = 24. (Pinned in public-api.test.ts.)
+export {
+  EvidencePackResource,
+  PACK_TYPES,
+  PACK_STATUSES,
+  EXPORT_FORMATS,
+  type PackType,
+  type PackStatus,
+  type ExportFormat,
+  type CreateEvidencePackInput,
+  type GetEvidencePackInput,
+  type ListEvidencePacksInput,
+  type AddBundleInput,
+  type SignEvidencePackInput,
+  type SupersedeEvidencePackNewPack,
+  type SupersedeEvidencePackInput,
+  type RevokeEvidencePackInput,
+  type ExportEvidencePackInput,
+  type EvidencePack,
+  type ReperformanceBundle,
+  type GetEvidencePackResponse,
+  type ListEvidencePacksResponse,
+  type HashCollision,
+  type AddBundleResponse,
+  type SupersedeEvidencePackResponse,
+  type EvidencePackExportResult,
+} from "./resources/evidence-pack.js";
+
+// ─── Vision (W1 — the 19-symbol surface, C-D6) ──────────────────────────────
+// 5 runtime-valued + 14 type-erased = 19.
+export {
+  VisionResource,
+  SUPPORTED_MEDIA_TYPES,
+  SUPPORTED_DOCUMENT_TYPES,
+  VISION_MODELS,
+  PACK_INTEGRATION_STATUSES,
+  type VisionSupportedMediaType,
+  type VisionSupportedDocumentType,
+  type VisionModelTier,
+  type VisionPackIntegrationStatus,
+  type VisionExtractInput,
+  type VisionBatchDocument,
+  type VisionBatchExtractInput,
+  type VisionSchemaCompatibility,
+  type VisionPackIntegrationHashCollision,
+  type VisionPackIntegrationResult,
+  type VisionTokensUsed,
+  type VisionExtractResponse,
+  type VisionBatchExtractResponse,
+  type VisionJobStatus,
+} from "./resources/vision.js";
+
+// ─── Annex IV technical-file bind path (work-item C — the ≥0.7.0 surface) ───
+export {
+  AnnexIvResource,
+  type AnnexIvGenerateResult,
+  type AnnexIvBindResult,
+  type AnnexIvDownloadPdfResult,
+  type GenerateAnnexIvInput,
+  type GetAnnexIvBindInput,
+  type DownloadAnnexIvPdfInput,
+} from "./resources/annex-iv.js";
+
+// The bundled PURE offline verifier — a TOP-LEVEL export (no apiKey/transport/
+// network), NOT a client method (C-D5).
+export {
+  verifyAnnexIvBindOffline,
+  makeJwksResolver,
+  type VerifyAnnexIvBindOfflineInput,
+  type VerifyAnnexIvBindResult,
+  type PublicKeyResolver,
+  type Ed25519PublicJwk,
+  type AnnexIvBindPayload,
+} from "./annex-iv-verify/index.js";

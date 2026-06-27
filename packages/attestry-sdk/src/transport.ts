@@ -41,7 +41,7 @@ import type {
   RequestOptions,
 } from "./types.js";
 
-const DEFAULT_BASE_URL = "https://app.attestry.ai";
+const DEFAULT_BASE_URL = "https://attestry.ai";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 interface ResolvedClientConfig {

@@ -1,7 +1,7 @@
 {
   "name": "@attestry/sdk",
-  "version": "0.6.0",
-  "description": "Official TypeScript SDK for the Attestry compliance kernel \u2014 submit AI incidents, fetch decisions, query the cross-tenant pattern corpus.",
+  "version": "0.7.0",
+  "description": "Official TypeScript SDK for the Attestry compliance kernel — generate and offline-verify sealed EU AI Act Annex IV technical files, submit AI incidents, fetch decision records, and run CI/CD compliance gates.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -32,6 +32,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.1.0",
+    "@noble/hashes": "^2.2.0",
+    "canonicalize": "^3.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

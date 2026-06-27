@@ -13,6 +13,74 @@
 import { describe, it, expect } from "vitest";
 import * as sdk from "../index.js";
 
+// ─── Compile-time pin (C-D6 split-(b)): the type-erased public surface ───────-
+//
+// A runtime `typeof sdk.X` sweep CANNOT catch a dropped TYPE-only re-export (a
+// type has no runtime value). This `import type` block is the compile-time half:
+// a dropped type re-export → TS2305 at test-compile (the SDK `tsc` gate). Covers
+// the 5 verifier types + the 20 type-erased evidence-pack symbols (17 interfaces
+// + 3 types). The runtime-valued symbols are pinned via `typeof` below.
+import type {
+  // verifier (5)
+  VerifyAnnexIvBindOfflineInput,
+  VerifyAnnexIvBindResult,
+  PublicKeyResolver,
+  Ed25519PublicJwk,
+  AnnexIvBindPayload,
+  // evidence-pack type-erased (20 = 3 types + 17 interfaces)
+  PackType,
+  PackStatus,
+  ExportFormat,
+  CreateEvidencePackInput,
+  GetEvidencePackInput,
+  ListEvidencePacksInput,
+  AddBundleInput,
+  SignEvidencePackInput,
+  SupersedeEvidencePackNewPack,
+  SupersedeEvidencePackInput,
+  RevokeEvidencePackInput,
+  ExportEvidencePackInput,
+  EvidencePack,
+  ReperformanceBundle,
+  GetEvidencePackResponse,
+  ListEvidencePacksResponse,
+  HashCollision,
+  AddBundleResponse,
+  SupersedeEvidencePackResponse,
+  EvidencePackExportResult,
+} from "../index.js";
+
+// A type-level assertion that each imported type is referenced (so an unused-
+// import lint or a dropped re-export surfaces). `never` cast keeps it inert.
+type _PinnedPublicTypes =
+  | VerifyAnnexIvBindOfflineInput
+  | VerifyAnnexIvBindResult
+  | PublicKeyResolver
+  | Ed25519PublicJwk
+  | AnnexIvBindPayload
+  | PackType
+  | PackStatus
+  | ExportFormat
+  | CreateEvidencePackInput
+  | GetEvidencePackInput
+  | ListEvidencePacksInput
+  | AddBundleInput
+  | SignEvidencePackInput
+  | SupersedeEvidencePackNewPack
+  | SupersedeEvidencePackInput
+  | RevokeEvidencePackInput
+  | ExportEvidencePackInput
+  | EvidencePack
+  | ReperformanceBundle
+  | GetEvidencePackResponse
+  | ListEvidencePacksResponse
+  | HashCollision
+  | AddBundleResponse
+  | SupersedeEvidencePackResponse
+  | EvidencePackExportResult;
+const _pinnedPublicTypes = undefined as unknown as _PinnedPublicTypes;
+void _pinnedPublicTypes;
+
 describe("public API — index.ts re-exports", () => {
   it("exports AttestryClient (class)", () => {
     expect(typeof sdk.AttestryClient).toBe("function");
@@ -267,6 +335,10 @@ describe("public API — index.ts re-exports", () => {
     expect(client.batch).toBeInstanceOf(sdk.BatchResource);
     expect(client.shipGate).toBeInstanceOf(sdk.ShipGateResource);
     expect(client.abacPolicies).toBeInstanceOf(sdk.AbacPoliciesResource);
+    // The flagship + Annex IV resources land on the public surface too.
+    expect(client.evidencePack).toBeInstanceOf(sdk.EvidencePackResource);
+    expect(client.vision).toBeInstanceOf(sdk.VisionResource);
+    expect(client.annexIv).toBeInstanceOf(sdk.AnnexIvResource);
   });
 
   it("exports DEFAULT_RETRY_OPTIONS (retry middleware config)", () => {
@@ -603,5 +675,66 @@ describe("public API — index.ts re-exports", () => {
     expect(sdk.ABAC_POLICY_EFFECTS.length).toBe(2);
     expect(sdk.ABAC_POLICY_EFFECTS).toEqual(["allow", "deny"]);
     expect(Object.isFrozen(sdk.ABAC_POLICY_EFFECTS)).toBe(true);
+  });
+
+  // ─── Evidence packs — runtime surface (C-D6 split-(a) / RD-C6) ────────────-
+  it("exports EvidencePackResource (class) + its 3 method-set", () => {
+    expect(typeof sdk.EvidencePackResource).toBe("function");
+    expect(sdk.EvidencePackResource.prototype).toBeDefined();
+    const client = new sdk.AttestryClient({
+      apiKey: "k",
+      fetch: async () => new Response("{}", { status: 200 }),
+    });
+    expect(typeof client.evidencePack.create).toBe("function");
+    expect(typeof client.evidencePack.export).toBe("function");
+    expect(typeof client.evidencePack.supersede).toBe("function");
+  });
+
+  it("exports the 4 runtime-valued evidence-pack consts (frozen tuples)", () => {
+    // A hardcoded expected-4 (NOT a self-grep over the index, which is tautological):
+    // the 4 runtime-valued ep symbols are EvidencePackResource (class, above) +
+    // PACK_TYPES + PACK_STATUSES + EXPORT_FORMATS.
+    expect(Array.isArray(sdk.PACK_TYPES)).toBe(true);
+    expect(Object.isFrozen(sdk.PACK_TYPES)).toBe(true);
+    expect(Array.isArray(sdk.PACK_STATUSES)).toBe(true);
+    expect(Object.isFrozen(sdk.PACK_STATUSES)).toBe(true);
+    expect(sdk.EXPORT_FORMATS).toEqual(["json", "pdf", "zip"]);
+    expect(Object.isFrozen(sdk.EXPORT_FORMATS)).toBe(true);
+  });
+
+  // ─── Vision — runtime surface (C-D6) ──────────────────────────────────────-
+  it("exports VisionResource (class) + its method-set + the 4 frozen const tuples", () => {
+    expect(typeof sdk.VisionResource).toBe("function");
+    expect(sdk.VisionResource.prototype).toBeDefined();
+    const client = new sdk.AttestryClient({
+      apiKey: "k",
+      fetch: async () => new Response("{}", { status: 200 }),
+    });
+    expect(typeof client.vision.extract).toBe("function");
+    expect(Object.isFrozen(sdk.SUPPORTED_MEDIA_TYPES)).toBe(true);
+    expect(Object.isFrozen(sdk.SUPPORTED_DOCUMENT_TYPES)).toBe(true);
+    expect(sdk.VISION_MODELS).toEqual(["opus", "sonnet"]);
+    expect(Object.isFrozen(sdk.VISION_MODELS)).toBe(true);
+    expect(Object.isFrozen(sdk.PACK_INTEGRATION_STATUSES)).toBe(true);
+  });
+
+  // ─── Annex IV resource + the pure verifier — runtime surface (C-D5/C-D6/C-C-12) -
+  it("exports AnnexIvResource (class) + its generate/downloadPdf/getBind method-set", () => {
+    expect(typeof sdk.AnnexIvResource).toBe("function");
+    expect(sdk.AnnexIvResource.prototype).toBeDefined();
+    const client = new sdk.AttestryClient({
+      apiKey: "k",
+      fetch: async () => new Response("{}", { status: 200 }),
+    });
+    expect(typeof client.annexIv.generate).toBe("function");
+    expect(typeof client.annexIv.downloadPdf).toBe("function");
+    expect(typeof client.annexIv.getBind).toBe("function");
+  });
+
+  it("exports the TWO top-level pure verifier runtime functions (C-C-12)", () => {
+    // The verifier ships TWO top-level runtime exports; this is the ONLY file
+    // importing through index.ts, so a dropped re-export fails ONLY here.
+    expect(typeof sdk.verifyAnnexIvBindOffline).toBe("function");
+    expect(typeof sdk.makeJwksResolver).toBe("function");
   });
 });

@@ -21,7 +21,7 @@ export interface AttestryClientOptions {
   apiKey: string;
 
   /**
-   * Base URL of the Attestry API. Defaults to `https://app.attestry.ai`.
+   * Base URL of the Attestry API. Defaults to `https://attestry.ai`.
    * Override for self-hosted, EU residency, or local dev.
    */
   baseUrl?: string;
