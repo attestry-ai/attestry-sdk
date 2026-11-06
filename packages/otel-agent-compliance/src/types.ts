@@ -25,7 +25,7 @@ export interface ToolInvocation {
 }
 
 /**
- * The shape we POST to `/api/v1/decisions/batch` as one item. Mirrors
+ * The shape we POST to `/api/v1/decisions/bulk` as one item. Mirrors
  * `DecisionCreateInput` on the server but kept structurally local — the
  * exporter never imports server code.
  *
@@ -60,14 +60,15 @@ export interface DecisionInput {
  */
 export interface AttestryExporterConfig {
   /**
-   * Full URL of the ingest endpoint. Customers pass either:
-   *   - `https://attestry.app/api/v1/decisions/bulk` (default ingest), or
-   *   - `https://attestry.app/api/otel/{orgSlug}/v1/traces/decisions`
-   *     (OTel-native path that maps spans → decisions server-side).
+   * Full URL of the bulk decision ingest endpoint (`POST
+   * /api/v1/decisions/bulk`). For the hosted service this is
+   * `https://attestry.ai/api/v1/decisions/bulk`.
    *
    * The exporter doesn't infer this from `apiKey`; the customer provides
    * the literal URL so that staging / on-prem deployments work without
-   * an extra env var.
+   * an extra env var. It must be the FINAL URL: redirects are never
+   * followed (so `x-api-key` is never forwarded to another origin), and
+   * a 3xx is logged as a failed batch.
    */
   apiUrl: string;
   apiKey: string;
@@ -76,6 +77,10 @@ export interface AttestryExporterConfig {
    * Optional override for the default PII sanitizer. Receives the
    * span's attribute bag, returns the redacted attribute bag. Pure
    * function — exporter doesn't expect side effects.
+   *
+   * The returned bag is ALSO what `inputDigest` / `outputDigest` are
+   * computed over: digests fingerprint the redacted input, never the
+   * raw one (see README "Digest semantics").
    */
   sanitizer?: (attrs: Record<string, unknown>) => Record<string, unknown>;
   /**
@@ -113,4 +118,49 @@ export interface SpanFrameworkContext {
 export interface ExporterLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
   error(message: string, meta?: Record<string, unknown>): void;
+}
+
+// ─── Structural OpenTelemetry types ──────────────────────────────────
+
+/*
+ * The package depends on NO `@opentelemetry/*` package, not even for
+ * types: these are the minimal shapes the exporter actually touches.
+ * Spans and span processors from OpenTelemetry JS 2.x
+ * (`@opentelemetry/sdk-trace-base` 2.0+, `@opentelemetry/sdk-trace` 2.9+)
+ * and 3.x (`@opentelemetry/sdk-trace` 3.x) are structurally compatible
+ * with them. `scripts/otel-compat.mjs` proves this with a consumer
+ * typecheck against the real types of every sdk-node row in its matrix,
+ * from 0.200.0 through the latest release.
+ *
+ * Why not import the real OTel types and declare an (optional) peer?
+ * npm resolves an ABSENT optional peer at its newest version when it
+ * checks for conflicts. No single OTel tracing package exists across
+ * both lines with compatible `@opentelemetry/api` ranges:
+ * `@opentelemetry/sdk-trace` starts at 2.9.0, and its 3.x needs
+ * api >=1.10; `sdk-trace-base` is 2.x-only, with api <1.10. So any
+ * such peer makes `npm install` ERESOLVE in an existing project on one
+ * of the two lines.
+ */
+
+/** The part of a just-started span the exporter uses (`onStart`). */
+export interface SpanLike {
+  setAttribute(key: string, value: string): unknown;
+}
+
+/** The part of an ended span the exporter reads (`onEnd`). */
+export interface ReadableSpanLike {
+  readonly name: string;
+  readonly attributes: Readonly<Record<string, unknown>>;
+  spanContext(): { readonly spanId: string };
+}
+
+/**
+ * Structural OpenTelemetry `SpanProcessor`. The 2.x and 3.x interfaces
+ * share this shape; 3.x's optional `onEnding` is not implemented.
+ */
+export interface SpanProcessorLike {
+  onStart(span: SpanLike, parentContext?: unknown): void;
+  onEnd(span: ReadableSpanLike): void;
+  forceFlush(): Promise<void>;
+  shutdown(): Promise<void>;
 }

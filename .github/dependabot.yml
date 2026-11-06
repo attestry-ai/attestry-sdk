@@ -1,0 +1,47 @@
+# Dependabot for the public Attestry SDK repo (attestry-ai/attestry-sdk).
+#
+# AUTHORED in the private monorepo at
+# scripts/publish/mirror-root/github/dependabot.yml and byte-mirrored to
+# .github/dependabot.yml. The mirror is a byte mirror, so do NOT merge these
+# PRs on the mirror (the next sync would revert them). Treat each PR as a
+# signal: make the same change in the monorepo, then re-mirror. See
+# scripts/publish/RELEASE.md.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /packages/attestry-sdk
+      - /packages/otel-agent-compliance
+      - /packages/mcp-server
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7 # let a fresh release age a week before proposing it
+    open-pull-requests-limit: 10
+    groups:
+      opentelemetry:
+        patterns: ["@opentelemetry/*"]
+      development-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production-dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+    ignore:
+      # The JCS output must change in lock-step with the kernel signer (the SDK
+      # verifier re-canonicalizes signed payloads). Upgrade it deliberately.
+      - dependency-name: canonicalize
+        update-types: ["version-update:semver-major"]
+      # @types/node tracks the oldest supported Node, not the newest.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -19,6 +19,11 @@
 //      requires caller-supplied key material (`resolvePublicKey` or `jwks`) per
 //      the SDK contract; the kernel's default `resolvePublicKeyByVerificationMethod`
 //      is server-only.
+//   3. A caller USAGE error in the options (`requireRevocationCheck` not a
+//      boolean; a bad `now` / `maxStatusListAgeMs` / `clockToleranceMs`) is
+//      re-thrown as a typed `AttestryError` carrying the kernel's message (the
+//      kernel throws the bare `TypeError`/`RangeError`). Same precondition, same
+//      point (before step 0), never a verdict.
 
 import { AttestryError } from "../errors.js";
 import { base64urlToBytes } from "./jwk.js";
@@ -27,7 +32,9 @@ import { type PublicKeyResolver } from "./data-integrity.js";
 import {
   BITSTRING_STATUS_LIST_ENTRY,
   checkRevocationOffline,
+  resolveRevocationCheckOptions,
   type CredentialStatusEntry,
+  type ResolvedRevocationCheckOptions,
   type RevocationCheck,
 } from "./status-list.js";
 import { makeJwksResolver, type Ed25519PublicJwk } from "./resolver.js";
@@ -113,7 +120,8 @@ function sha256Prefixed(bytes: Uint8Array): string {
 /**
  * Parse a compact `ANNEX-IV-BIND-v1` JWS into its segments + decoded
  * header/payload. Fails closed on a malformed serialization, wrong segment
- * count, or absent domain tags. Does NOT verify the signature.
+ * count, absent domain tags, a protected-header `alg` other than `EdDSA`, or any
+ * `crit` header. Does NOT verify the signature.
  */
 export function parseAnnexIvBindJws(jws: string): ParsedAnnexIvBindJws {
   if (typeof jws !== "string") {
@@ -132,8 +140,25 @@ export function parseAnnexIvBindJws(jws: string): ParsedAnnexIvBindJws {
   } catch (e) {
     throw new AnnexIvBindError(`malformed JWS segment: ${e instanceof Error ? e.message : String(e)}`);
   }
+  if (header === null || typeof header !== "object" || Array.isArray(header)) {
+    throw new AnnexIvBindError("malformed JWS protected header: not a JSON object");
+  }
   if (header.typ !== ANNEX_IV_BIND_JWS_TYP) {
     throw new AnnexIvBindError(`unexpected JWS typ: ${JSON.stringify(header.typ)}`);
+  }
+  // RFC 7515 §4.1.1 / RFC 8725 §3.1: the verifier PINS the algorithm — it never
+  // takes it from the attacker-controlled header. Only `EdDSA` (Ed25519) is
+  // accepted; `none`, `HS256`, an absent `alg`, etc. are rejected outright, even
+  // over an otherwise-valid Ed25519 signature.
+  if (header.alg !== ANNEX_IV_BIND_ALG) {
+    throw new AnnexIvBindError(
+      `unexpected JWS alg: ${JSON.stringify(header.alg)} (only ${JSON.stringify(ANNEX_IV_BIND_ALG)} is accepted)`,
+    );
+  }
+  // RFC 7515 §4.1.11: a `crit` header names extensions the recipient MUST
+  // understand. This verifier implements none, so any `crit` is rejected.
+  if (header.crit !== undefined) {
+    throw new AnnexIvBindError(`unsupported JWS crit header: ${JSON.stringify(header.crit)}`);
   }
   if (payload?.type !== ANNEX_IV_BIND_TYPE) {
     throw new AnnexIvBindError(`unexpected payload type: ${JSON.stringify(payload?.type)}`);
@@ -166,10 +191,22 @@ export function verifyAnnexIvBindReceivedOctets(
 
 /** The structured, fail-closed result of {@link verifyAnnexIvBindOffline}. */
 export interface VerifyAnnexIvBindResult {
-  /** Overall verdict: tag ∧ fields ∧ signature ∧ byte-hash ∧ not-a-confirmed-revocation. */
+  /**
+   * Overall verdict: tag ∧ fields ∧ signature ∧ byte-hash ∧ not-a-confirmed-revocation
+   * ∧ a well-formed supplied status list (∧ a CHECKED revocation status when
+   * `requireRevocationCheck` is set). NOTE: by default `valid:true` does NOT mean
+   * "not revoked" — act on {@link VerifyAnnexIvBindResult.trustworthy}.
+   */
   valid: boolean;
-  /** The first failing step (0–4) or "revocation" — for diagnostics. */
+  /** The first failing step (0–4) or the revocation-leg failure — for diagnostics. */
   reason?: string;
+  /**
+   * The single safe-to-act-on verdict (P2-11): `valid && revocation.checked &&
+   * !revocation.revoked` — the artifact verifies AND a fresh, authentic status
+   * list confirmed it is NOT revoked. `valid:true` with `trustworthy:false` means
+   * "intact as issued, revocation status unknown".
+   */
+  trustworthy: boolean;
   /** True once the protected-header + payload domain tags both matched (step 0). */
   tagOk: boolean;
   /** True once every bind field was present + well-typed (step 1). */
@@ -210,8 +247,11 @@ export interface VerifyAnnexIvBindOfflineInput {
   /** The PDF bytes to byte-bind against `payload.pdf_byte_sha256` (step 4). */
   pdfBytes: Uint8Array;
   /**
-   * A cached/out-of-band status-list VC for the two-check revocation (step 6).
-   * Omitted ⇒ `revocation.checked = false` (honest "status not evaluated").
+   * A cached/out-of-band status-list VC for the two-check revocation (step 6) —
+   * the PARSED JSON object (`await res.json()`, not `res.text()`). Omitted (or
+   * `null`) ⇒ `revocation.checked = false` (honest "status not evaluated"). A
+   * supplied value that is not a JSON object or lacks `proof`/`type`/
+   * `credentialSubject` ⇒ `valid:false` with `revocation.malformed: true` (P2-11).
    */
   cachedStatusListCredential?: unknown;
   /**
@@ -227,6 +267,19 @@ export interface VerifyAnnexIvBindOfflineInput {
    * `makeJwksResolver` (kid-match → `null` on a bad/absent entry, never throws).
    */
   jwks?: Ed25519PublicJwk[] | { keys: Ed25519PublicJwk[] };
+  /**
+   * P2-11: when `true`, a revocation status that could NOT be checked (no list,
+   * an untrusted / mismatched / expired / stale list, …) is a hard failure —
+   * `valid:false`, `reason: "revocation not checked: …"`. Default `false`
+   * (backward compatible: unchecked leaves `valid` standing; read `trustworthy`).
+   */
+  requireRevocationCheck?: boolean;
+  /** P2-12: the instant the status-list validity window is evaluated at (epoch ms or Date). Default: now. */
+  now?: number | Date;
+  /** P2-12: reject (as unchecked) a status list whose `validFrom` is older than this many ms. */
+  maxStatusListAgeMs?: number;
+  /** P2-12: clock-skew tolerance (ms) on the status-list window bounds. Default 60 000. */
+  clockToleranceMs?: number;
 }
 
 // ─── Fail-closed result helpers (verbatim) ──────────────────────────────────-
@@ -239,6 +292,7 @@ function bindInvalid(
   return {
     valid: false,
     reason,
+    trustworthy: false,
     tagOk: false,
     fieldsOk: false,
     signatureOk: false,
@@ -294,12 +348,16 @@ function allBindFieldsWellTyped(p: AnnexIvBindPayload): boolean {
  *   4. Byte-binding (AFTER 0–3): `sha256(suppliedPdfBytes)` vs `pdf_byte_sha256`.
  *   5. Temporal — declared N/A (10-yr artifact; invalidation = revocation).
  *   6. Two-check revocation — `checkRevocationOffline(credentialStatus, cached,
- *      resolver, issuer)`; VALID requires signature-valid AND bit-not-revoked;
- *      no cached list ⇒ `checked:false`.
+ *      resolver, issuer, window)` (the issuer-binding + validity-window legs);
+ *      VALID requires signature-valid AND bit-not-revoked; no cached list ⇒
+ *      `checked:false`. A SUPPLIED-but-malformed list ⇒ INVALID (P2-11); an
+ *      unchecked status ⇒ INVALID only under `requireRevocationCheck`.
+ *      `trustworthy` is `valid ∧ checked ∧ ¬revoked`.
  *
  * THROW/NEVER-THROW CONTRACT (the single source of truth):
- *   - Throws ONLY the typed missing-key-material precondition (`AttestryError`)
- *     — a usage error, NOT a verification failure.
+ *   - Throws ONLY the typed usage-error preconditions (`AttestryError`) —
+ *     missing key material, or a bad `requireRevocationCheck` / `now` /
+ *     `maxStatusListAgeMs` / `clockToleranceMs` — NOT a verification failure.
  *   - NEVER throws on a malformed/forged JSON ARTIFACT (sidecar / pdf /
  *     statusList → fail-closed `valid:false`; the per-guard hostile table pins
  *     the tampered-list cases). CAVEAT: a `cachedStatusListCredential` HAND-BUILT
@@ -330,9 +388,27 @@ export function verifyAnnexIvBindOffline(
       "verifyAnnexIvBindOffline requires key material: pass `resolvePublicKey` or `jwks`",
     );
   }
+  // The window/policy options — the same usage-error preconditions, in the same
+  // order, as the kernel (divergence 3: re-thrown as a typed AttestryError).
+  let requireRevocationCheck: boolean;
+  let revocationWindow: ResolvedRevocationCheckOptions;
+  try {
+    if (input.requireRevocationCheck !== undefined && typeof input.requireRevocationCheck !== "boolean") {
+      throw new TypeError("`requireRevocationCheck` must be a boolean");
+    }
+    requireRevocationCheck = input.requireRevocationCheck === true;
+    revocationWindow = resolveRevocationCheckOptions({
+      now: input.now,
+      maxStatusListAgeMs: input.maxStatusListAgeMs,
+      clockToleranceMs: input.clockToleranceMs,
+    });
+  } catch (e) {
+    throw new AttestryError(`verifyAnnexIvBindOffline: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   // Step 0 — parse + domain-tag assert. `parseAnnexIvBindJws` fails closed on a
-  // wrong segment count, malformed JSON, or a mismatched/absent `typ`/`type` tag.
+  // wrong segment count, malformed JSON, a mismatched/absent `typ`/`type` tag, a
+  // header `alg` other than EdDSA, or any `crit` header.
   let parsed: ParsedAnnexIvBindJws;
   try {
     parsed = parseAnnexIvBindJws(input.sidecarJws);
@@ -387,21 +463,38 @@ export function verifyAnnexIvBindOffline(
     });
   }
 
-  // Step 6 — two-check revocation (4-arg, incl. the issuer-binding leg). The
-  // revocation leg also calls the resolver bare (a throw propagates). A confirmed
-  // revocation (checked AND revoked) is the only revocation FAIL; an unchecked
-  // status leaves the verdict standing, honestly labelled `checked:false`.
+  // Step 6 — two-check revocation (incl. the issuer-binding + validity-window
+  // legs). The revocation leg also calls the resolver bare (a throw propagates).
+  // A confirmed revocation (checked AND revoked) FAILS; a supplied list that is
+  // structurally MALFORMED fails loudly (P2-11 — a caller error such as passing
+  // the response text, never a silent "unchecked"); an unchecked status
+  // otherwise leaves the verdict standing, honestly labelled `checked:false` —
+  // unless the caller set `requireRevocationCheck`.
   const revocation = checkRevocationOffline(
     payload.credentialStatus,
     input.cachedStatusListCredential,
     resolvePublicKey,
     payload.issuer,
+    {
+      now: revocationWindow.nowMs,
+      maxStatusListAgeMs: revocationWindow.maxStatusListAgeMs,
+      clockToleranceMs: revocationWindow.clockToleranceMs,
+    },
   );
-  const confirmedRevoked = revocation.checked && revocation.revoked;
+  let failure: string | undefined;
+  if (revocation.checked && revocation.revoked) {
+    failure = "revoked";
+  } else if (revocation.malformed === true) {
+    failure = revocation.reason ?? "malformed status list";
+  } else if (requireRevocationCheck && !revocation.checked) {
+    failure = `revocation not checked: ${revocation.reason ?? "unknown"}`;
+  }
+  const valid = failure === undefined;
 
   return {
-    valid: !confirmedRevoked,
-    reason: confirmedRevoked ? "revoked" : undefined,
+    valid,
+    reason: failure,
+    trustworthy: valid && revocation.checked && !revocation.revoked,
     tagOk: true,
     fieldsOk: true,
     signatureOk: true,

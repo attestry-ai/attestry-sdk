@@ -2,6 +2,8 @@
 
 Official TypeScript SDK for the [Attestry](https://attestry.ai) compliance kernel. Submit AI incidents, fetch decision records, subscribe to live decision streams, and chat with the Reggie compliance copilot from server-side TypeScript / JavaScript code.
 
+> **0.8.0** (no API removals; behaviour changes — redirects now fail instead of being followed, Node 20.19+ is required, a malformed status list now makes a bind invalid, status lists are checked against their validity window, JWS headers must be `EdDSA`, and the package has an `exports` map — are listed in [CHANGELOG.md](CHANGELOG.md)). Offline verifier: new `trustworthy` result field and `requireRevocationCheck` / `now` / `maxStatusListAgeMs` / `clockToleranceMs` options, a dedicated `@attestry/sdk/annex-iv-verify` entry point, and the root import no longer pulls `node:zlib` into non-Node bundles (see [Verifying Annex IV binds offline](#verifying-annex-iv-binds-offline)). Transport and resources: `decisions.stream()` no longer merges or drops SSE frames that share a network chunk; `timeoutMs` and `options.signal` now cover reading the response body (a stalled body used to hang); `annexIv.generate` defaults to a 300s timeout (see [`client.annexIv`](#clientannexiv)); `annexIv.downloadPdf` and `evidencePack.export` now have a timeout covering the download (`evidencePack.export` defaults to 120s); redirects are never followed, so `x-api-key` is never forwarded to another URL; a redirect or a non-JSON 2xx (e.g. an HTML gate page) fails with an error naming the URL and `baseUrl`; an `apiKey` that is not a valid header value fails at construction; new per-call `options.timeoutMs`; ESM-only (as before).
+>
 > **Status — v0.7.0.** Twelve resources shipped — headline: **`annexIv` (W3, the offline-verifiable EU AI Act Annex IV technical-file path)**: `annexIv.generate` (first-bind-only POST minting the sealed, cryptographically bound Annex IV PDF for a signed technical file), `annexIv.downloadPdf` (the single authenticated call returning the sealed PDF bytes — served from persisted storage, never re-rendered), `annexIv.getBind` (the bind record: hash, signature, status-list ref, sidecar), plus the bundled **offline verifier** `verifyAnnexIvBindOffline` (pure Ed25519/`@noble` public-key verification of the PDF bytes against the bind — no network, no DB, no kernel import; revocation via the signed status list when supplied). The `annexIv` cluster and the offline verifier are NEW IN 0.7.0 — their first published release (npm 0.6.0 predates them entirely). The eleven pre-W3 resources: `incidents` (create / list / update / search), `decisions` (ingest / bulk / retrieve / list / SSE stream / NDJSON export / chain verify — **decisions surface complete**, 7 methods), `chat` (send + iterator), `auditLog` (export — multi-format SIEM streaming with auto-pagination; verifyChain — org-wide audit-log hash-chain integrity verdict; 2 methods today), `regulatoryChanges` (list — read-only feed of regulatory updates filtered by framework / severity / status / date-range), `complianceCheck` (check — per-system or per-org compliance summary with active-attestations + framework coverage), `check` (run — flat per-system CI/CD compliance check with framework filter, first SDK route to pre-validate every Zod closed-spec rule synchronously), `gate` (evaluate — pass/fail CI/CD deployment gate with structured gap output + score-threshold + missing-assessment policy), `batch` (submit + get — bulk classification/assessment for up to 50 systems with per-row partial-success envelope; **first SDK resource with asymmetric auth between methods**, **first SDK route with a plan-guard 403 surface distinct from the permission-403**), `shipGate` (check — CI/CD ship-gate verdict on whether a build is gated by an in-flight approval-chain execution; 4-shape variadic response with snake_case `approvers_pending` wire field), `abacPolicies` (list / create / retrieve / update / delete — attribute-based access-control (ABAC) policy management; the SDK's FIRST 5-method CRUD cluster, and the FIRST SDK method on the HTTP `DELETE` verb). API is stable inside its surface; new resources are additive. Automatic retry on 429 is on by default.
 >
 > **0.5.7 — `abacPolicies` CRUD cluster completed** (additive, no breaking changes). The `abacPolicies` resource — attribute-based access-control policy management — reaches its full 5-method surface: `list` / `create` (shipped 0.5.6) plus `retrieve` / `update` / `delete` (this release). **The SDK's FIRST 5-method CRUD cluster** — prior multi-method resources either grew an existing class over many sessions (`decisions` reached 7) or shipped a smaller surface. **FIRST SDK method on the HTTP `DELETE` verb** (`abacPolicies.delete`) and **SECOND on the HTTP `PATCH` verb** (`abacPolicies.update`; `incidents.update` is the first). **The three id-path methods** (`retrieve` / `update` / `delete`) pre-validate `id` against a strict RFC 4122 UUID regex and interpolate it into the request path RAW — mirror of `batch.get`, with **NO `encodeURIComponent` and NO `URIError` defense**: a string matching the UUID regex is ASCII hex + hyphens, URL-safe verbatim and incapable of forming a lone surrogate, so a malformed `id` is pre-rejected synchronously (`TypeError`) before any URL is built (asymmetric with `decisions.retrieve`, whose free-form id needs `encodePathSegment`). **`abacPolicies.update` is the richest method of the cluster** — a **6-arm `instanceof` catch block (the LARGEST on the SDK)**, the three-way 422 fan-out inherited from `.create` (`BodyParseError` → `Array<{path, message}>` / a defensive DEAD `ZodError` arm → `ZodIssue[]` / `AbacPolicyValidationError` → `{errors: string[]}`) PLUS HTTP 409 (name conflict) PLUS HTTP 404 (`AbacPolicyNotFoundError`, an id-embedded message). **Empty-patch pre-validation** — `.update` is a partial update with every field optional; the SDK pre-rejects an empty patch (`update(id, {})`, an all-`undefined` patch, or a patch carrying only unknown keys) synchronously with a `TypeError`, mirroring the kernel `updateAbacPolicySchema`'s `.refine()`. `.delete` returns the **deleted row** (the policy as it existed immediately before deletion — NOT `void` / NOT a `{deleted:true}` envelope); `.update` returns the **updated row** (the `after` state). All 5 methods are **dual-auth admin scope** — HTTP 401 for no/invalid/expired key, HTTP 403 for a valid key lacking `ADMIN` (both branches distinct — pin separately). `.create` / `.update` / `.delete` each write one `abac_policy.*` audit-log entry; `.list` / `.retrieve` are quiet reads. Symmetric prototype-pollution defense on input AND response sides (`Object.hasOwn` module-load snapshot).
@@ -26,7 +28,9 @@ Official TypeScript SDK for the [Attestry](https://attestry.ai) compliance kerne
 npm install @attestry/sdk
 ```
 
-Requires Node 18+ (uses the global `fetch`). Browser support is intentionally NOT in v0 — server-side use only.
+Requires **Node 20.19+** (uses the global `fetch`; `@noble/hashes` needs 20.19+). Browser support is intentionally NOT in v0 — server-side use only.
+
+**ESM-only.** The package is `"type": "module"` with no CommonJS build: use `import { AttestryClient } from "@attestry/sdk"` (from CommonJS, `await import("@attestry/sdk")`). `require()` happens to work on Node versions with `require(esm)` (20.19+, 22.12+), but ESM is the supported path.
 
 ## Quick start
 
@@ -142,7 +146,7 @@ for (const change of recentCritical) {
 new AttestryClient({
   apiKey: "sk_live_…",                        // required
   baseUrl: "https://attestry.ai",             // optional — defaults to prod
-  timeoutMs: 30_000,                          // optional — defaults to 30s (NOT applied to streams)
+  timeoutMs: 30_000,                          // optional — defaults to 30s (NOT applied to long-lived streams)
   fetch: customFetch,                         // optional — defaults to globalThis.fetch
   retry: { maxRetries: 3 },                   // optional — see "Automatic retry" below
 });
@@ -150,13 +154,15 @@ new AttestryClient({
 
 | Option | Default | Notes |
 |---|---|---|
-| `apiKey` | required | API key from the Attestry org settings page. Sent as `x-api-key`. |
-| `baseUrl` | `https://attestry.ai` | Override for self-hosted, EU residency, or local dev. Trailing slashes are stripped. |
-| `timeoutMs` | `30_000` | Per-request timeout for JSON requests (not streams). Set `0` to disable. |
+| `apiKey` | required | API key from the Attestry org settings page. Sent as `x-api-key`. Must be visible ASCII: leading/trailing whitespace (e.g. a trailing newline) is trimmed; embedded CR/LF, spaces, control or non-ASCII characters (a pasted smart quote) throw `AttestryError` at construction. |
+| `baseUrl` | `https://attestry.ai` | Override for self-hosted, EU residency, or local dev. Trailing slashes are stripped. Redirects are never followed (see below). |
+| `timeoutMs` | `30_000` | Per-request timeout, covering the response body as well as the headers. Applies to JSON requests and to the one-shot downloads `annexIv.downloadPdf` and `evidencePack.export`, not to long-lived streams (`*.stream()`, `decisions.export()`, `auditLog.export()`). Set `0` to disable. Overrides per-method defaults (`annexIv.generate`: 300s, `evidencePack.export`: 120s); per-call `options.timeoutMs` overrides it. |
 | `fetch` | `globalThis.fetch` | Inject a custom fetch (testing, retries, observability). Must match the standard `fetch` signature. |
 | `retry` | `{maxRetries: 3, initialDelayMs: 1000, maxDelayMs: 30_000, honorRetryAfter: true}` | Automatic retry on 429. See "Automatic retry" section below. Set `{maxRetries: 0}` to disable. |
 
-Construction is fail-fast: a missing API key, missing fetch, or an invalid `timeoutMs` / `retry` config throws `AttestryError` synchronously.
+Construction is fail-fast: a missing or malformed API key, missing fetch, or an invalid `timeoutMs` / `retry` config throws `AttestryError` synchronously.
+
+**Redirects are never followed.** `fetch` strips only `Authorization` on a cross-origin redirect, not the custom `x-api-key` header, so the SDK sends every request with `redirect: "manual"`. A 3xx response — or a 2xx that isn't the expected content type, such as an HTML login or access-gate page — fails with an `AttestryAPIError` whose message names the URL and asks you to check `baseUrl`. If you see one, `baseUrl` is pointing at something other than the Attestry API origin.
 
 ## Errors
 
@@ -198,7 +204,13 @@ try {
 }
 ```
 
-The caller's `AbortSignal` is composed with the SDK's internal timeout signal (for JSON requests); aborting either one cancels the request. For streams, `signal` is the only cancellation hook — there's no internal timeout.
+The caller's `AbortSignal` is composed with the SDK's internal timeout signal (for JSON requests); aborting either one cancels the request. Both stay in force until the response body has been fully read, not just until the headers arrive. For long-lived streams, `signal` is the only cancellation hook — there's no internal timeout.
+
+Per call, `options.timeoutMs` overrides the client-wide `timeoutMs` (`0` disables it):
+
+```ts
+await client.decisions.list({ systemId }, { timeoutMs: 5_000 });
+```
 
 `signal.abort()` mid-retry-backoff also interrupts the wait immediately — the SDK rejects with `AttestryError("request aborted by caller")` rather than completing the backoff and retrying.
 
@@ -1211,6 +1223,115 @@ try {
   }
 }
 ```
+
+### `client.annexIv`
+
+The EU AI Act Annex IV technical-file bind path: mint the sealed, cryptographically bound Annex IV PDF for a signed technical file, then fetch its bytes and bind record.
+
+| Method | Wraps | Returns |
+|---|---|---|
+| `generate(input, options?)` | `POST /api/v1/technical-files/:id/annex-iv` | `AnnexIvGenerateResult` (201) |
+| `downloadPdf(input, options?)` | `GET /api/v1/technical-files/:id/annex-iv/pdf` | `{ contentType, contentDisposition, response }` — `response` is the un-consumed `Response` holding the PDF bytes |
+| `getBind(input, options?)` | `GET /api/v1/technical-files/:id/annex-iv/bind` | `AnnexIvBindResult` |
+
+`input` is `{ technicalFileId }` (a UUID; anything else throws `TypeError` synchronously, no request sent).
+
+**`generate` can take minutes.** The route composes up to nine narratives in series and may run for its full 300 s server limit. Since 0.8.0, `generate` defaults to a **300 000 ms** timeout instead of the client's 30 s. Precedence: per-call `options.timeoutMs`, then a client-wide `timeoutMs` you set explicitly (a client built with `{ timeoutMs: 60_000 }` gives `generate` 60 s too), then 300 000. Pass `{ timeoutMs: 0 }` to disable it.
+
+**`generate` is first-bind-only and metered.** Calling it for a file that is already bound fails with **422 `annex_iv.already_bound`**, and the call still counts against your usage.
+
+**On a timeout, call `getBind`. Do NOT call `generate` again.** A timeout only means the client stopped waiting. The server may still finish the bind, and a second `generate` would then 422. `getBind` tells you where things stand:
+
+- **200**: the bind exists. Use it.
+- **404** (`Annex IV bind not generated for this file.`): not bound yet. Poll `getBind` again. The route can keep working for up to 300 s after your call started. Only call `generate` again if `getBind` still returns 404 well after that window.
+
+```ts
+import { AttestryAPIError, AttestryError } from "@attestry/sdk";
+
+async function bindAnnexIv(technicalFileId: string) {
+  try {
+    return await client.annexIv.generate({ technicalFileId });
+  } catch (err) {
+    const timedOut =
+      err instanceof AttestryError &&
+      !(err instanceof AttestryAPIError) &&
+      err.message === "request timed out";
+    if (!timedOut) throw err;
+  }
+  // Timed out: the server may still be binding. Check status, don't re-generate.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      return await client.annexIv.getBind({ technicalFileId });
+    } catch (err) {
+      if (!(err instanceof AttestryAPIError && err.status === 404)) throw err;
+      await new Promise((r) => setTimeout(r, 30_000)); // not bound yet
+    }
+  }
+  throw new Error(`Annex IV bind for ${technicalFileId} did not appear; check before re-generating`);
+}
+```
+
+The two shapes differ. `generate` returns 8 fields: `technicalFileId`, `pdfByteSha256`, `signingKeyId`, `statusListRef`, `statusListIndex`, `sidecarJws`, `pdfUrl`, `bindUrl`. `getBind` returns 5: `sidecarJws`, plus `pdfByteSha256`, `signingKeyId`, `statusListRef` and `statusListIndex`, all four nullable.
+
+**`downloadPdf`** returns the response without reading it. Read the bytes with `new Uint8Array(await res.response.arrayBuffer())`. The client `timeoutMs` (or per-call `options.timeoutMs`) and `options.signal` cover the request **and** your read of the body, so read or cancel it promptly. If the deadline passes mid-download, the read rejects with `AttestryError("request timed out")`.
+
+## Verifying Annex IV binds offline
+
+`verifyAnnexIvBindOffline` checks a sealed Annex IV PDF against its bind (the compact EdDSA JWS sidecar) with no network and no DB: domain tags, signature over the received octets, PDF byte-hash, and — when you supply the issuer's signed status list — revocation. Import it from the dedicated subpath (the root `@attestry/sdk` re-exports the same function for compatibility):
+
+```ts
+import { AttestryClient } from "@attestry/sdk";
+import { verifyAnnexIvBindOffline } from "@attestry/sdk/annex-iv-verify";
+
+const client = new AttestryClient({ apiKey: process.env.ATTESTRY_API_KEY! });
+const technicalFileId = "…";
+
+const bind = await client.annexIv.getBind({ technicalFileId });
+const { response } = await client.annexIv.downloadPdf({ technicalFileId });
+const pdfBytes = new Uint8Array(await response.arrayBuffer());
+
+// Key material: the issuer's published JWKS, from a URL YOU trust (pin it).
+const jwks = await (await fetch("https://<issuer-host>/.well-known/keys")).json();
+// The signed status list the bind points at — the PARSED object (`.json()`, not `.text()`).
+const statusList = bind.statusListRef ? await (await fetch(bind.statusListRef)).json() : undefined;
+
+const result = verifyAnnexIvBindOffline({
+  sidecarJws: bind.sidecarJws,
+  pdfBytes,
+  jwks,
+  cachedStatusListCredential: statusList,
+  requireRevocationCheck: true, // an unchecked revocation status ⇒ valid:false
+  maxStatusListAgeMs: 60 * 60 * 1000, // optional: reject lists older than 1 h
+});
+
+if (!result.trustworthy) {
+  throw new Error(`Annex IV bind not trustworthy: ${result.reason ?? result.revocation.reason}`);
+}
+```
+
+**Act on `trustworthy` (or require `revocation.checked === true`), not on `valid` alone.** By default `valid: true` means *intact as issued* — it does **not** mean *not revoked*: with no status list, or one the verifier could not use (wrong id or issuer, bad signature, expired, stale…), `valid` stays `true` and `revocation.checked` is `false`. The result carries an explicit outcome so the two cannot be confused:
+
+| field | meaning |
+|---|---|
+| `trustworthy` | `valid && revocation.checked && !revocation.revoked` — the artifact verifies **and** an authentic, in-window status list confirmed it is not revoked. The one boolean to gate on. |
+| `valid` | Tag, fields, signature, byte-hash all pass, the bind is not a *confirmed* revocation, and any supplied status list is well-formed. With `requireRevocationCheck: true`, an unchecked revocation status also makes it `false` (`reason: "revocation not checked: …"`). |
+| `revocation.checked` | `true` only when an authentic list bound to this bind was actually read **and** could answer: inside its validity window, or — for a set revocation bit — at any time. `false` ⇒ status **unknown** (see `revocation.reason`). |
+| `revocation.revoked` | The status bit (revoked or suspended). Meaningful only when `checked` is `true`. |
+| `revocation.validFrom` / `validUntil` | The window of the list the verdict rests on. |
+| `revocation.malformed` | `true` when the value you passed as `cachedStatusListCredential` is not a parsed status-list object (e.g. the response **text**, `{}`, an API envelope). This is treated as a caller error: `valid: false`. Pass `undefined`/`null` when you have no list. |
+
+**Status-list validity window.** Issued status lists carry `validFrom` and `validUntil` (`validUntil = validFrom + 24 h`; the issuer re-signs the list on every request, so a freshly fetched list is minutes old). The verifier enforces `validFrom <= now < validUntil` when present, so an old snapshot cannot be replayed to hide a later revocation: an expired, not-yet-valid or stale list can no longer confirm *not revoked* — it gives `revocation.checked: false` (and `valid: false` under `requireRevocationCheck`). The window is asymmetric: if such an authentic list has the bind's **revocation** bit set, the bind is still reported revoked (`valid: false`), because a signed revocation cannot be forged and revocation is irreversible (`revocation.reason` notes the list was out of window). A *suspension* bit is reversible, so an out-of-window suspension stays unchecked. Options:
+
+| option | default | |
+|---|---|---|
+| `requireRevocationCheck` | `false` | Treat an unchecked revocation status as invalid. |
+| `now` | `Date.now()` | Evaluation instant (epoch ms or `Date`), e.g. to re-verify as of an audit date. |
+| `maxStatusListAgeMs` | unbounded | Additionally reject lists whose `validFrom` is older than this. |
+| `clockToleranceMs` | `60000` | Clock-skew allowance on the window bounds (`0` for the exact window). |
+
+Invalid option values (e.g. `now: NaN`, a negative age, a non-boolean `requireRevocationCheck`) throw `AttestryError` before anything is verified. The JWS protected header must declare `alg: "EdDSA"` and carry no `crit` parameter; anything else (`none`, `HS256`, …) is rejected even over a valid signature.
+
+**Runtimes.** Existing deep imports of `@attestry/sdk/dist/…` keep resolving (with their `.d.ts` types), but prefer the two public entry points. Importing `@attestry/sdk` or `@attestry/sdk/annex-iv-verify` never loads `node:zlib` outside Node, so the package bundles for browser / edge / worker targets. Running the verifier itself needs Node 20.19+ (or a runtime that provides `Buffer` and `node:zlib` through `process.getBuiltinModule`, e.g. Deno, Bun, or Workers with `nodejs_compat`); where the status-list codec is unavailable, revocation is reported unchecked, never "not revoked".
 
 ## Public enums
 

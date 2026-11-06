@@ -4,8 +4,14 @@
 // pins the fail-closed contract on malformed/forged artifact input + the
 // resolver-throw PROPAGATION (verdict-identity, C-C-2/MF-3) + the per-guard
 // tampered-status-list table (C-C-8 — each fixture OTHERWISE-valid so ONLY the
-// target guard fires; a tampered list is NEVER a false not-revoked, NEVER flips
-// valid).
+// target guard fires; a tampered or out-of-window list is NEVER a false
+// not-revoked, NEVER flips valid by default — and ALWAYS flips it under
+// `requireRevocationCheck`) + the P2-11 malformed-list table (a SUPPLIED list
+// that is not a parsed status-list object is the one list defect that flips
+// `valid` to false by default, with `revocation.malformed: true`) + the P2-12
+// out-of-window REVOCATION table (an authentic revocation bit outside the
+// window is still a confirmed revocation — the window only withholds "not
+// revoked"; W3C revocation is irreversible).
 //
 // The two distinct bad-input surfaces (do NOT conflate):
 //   - artifact input (sidecar/pdf/list) → fail-closed `valid:false` (NO throw);
@@ -41,6 +47,18 @@ interface HostileFixtures {
     expectedReason: string;
     sidecarJws?: string;
     pdfBytesB64?: string;
+    options?: { now?: string; maxStatusListAgeMs?: number; clockToleranceMs?: number };
+  }>;
+  malformedLists: Array<{
+    case: string;
+    statusListCredential: unknown;
+    expectedReason: string;
+  }>;
+  outOfWindowRevocations: Array<{
+    case: string;
+    statusListCredential: unknown;
+    expectedReason: string;
+    options?: { now?: string; maxStatusListAgeMs?: number; clockToleranceMs?: number };
   }>;
 }
 
@@ -53,6 +71,13 @@ const bytes = (b64: string): Uint8Array => new Uint8Array(Buffer.from(b64, "base
 const V2 = VECTORS.find((v) => v.id === "V2")!;
 const BASE_PDF = bytes(FX.base.pdfBytesB64);
 const BASE_JWKS = [FX.base.publicKeyJwk];
+
+/** A guard row's clock options (the P2-12 rows pin `now`) → verifier input. */
+const rowOptions = (o: HostileFixtures["guards"][number]["options"]) => ({
+  ...(o?.now !== undefined ? { now: Date.parse(o.now) } : {}),
+  ...(o?.maxStatusListAgeMs !== undefined ? { maxStatusListAgeMs: o.maxStatusListAgeMs } : {}),
+  ...(o?.clockToleranceMs !== undefined ? { clockToleranceMs: o.clockToleranceMs } : {}),
+});
 
 describe("verify-hostile — malformed/forged artifact input → fail-closed valid:false (NO throw)", () => {
   it("a non-JWS sidecar (wrong segment count) → valid:false on the tag/parse", () => {
@@ -145,18 +170,33 @@ describe("verify-hostile — resolver-throw PROPAGATES (verdict-identity, C-C-2/
 
 describe("verify-hostile — per-guard tampered status-list table (C-C-8: valid:true && checked:false + exact reason)", () => {
   for (const g of FX.guards) {
+    const input = () => ({
+      sidecarJws: g.sidecarJws ?? FX.base.sidecarJws,
+      pdfBytes: g.pdfBytesB64 ? bytes(g.pdfBytesB64) : BASE_PDF,
+      cachedStatusListCredential: g.statusListCredential,
+      jwks: BASE_JWKS,
+      ...rowOptions(g.options),
+    });
+
     it(`${g.guard} → valid:true, revocation.checked:false, reason="${g.expectedReason}"`, () => {
-      const r = verifyAnnexIvBindOffline({
-        sidecarJws: g.sidecarJws ?? FX.base.sidecarJws,
-        pdfBytes: g.pdfBytesB64 ? bytes(g.pdfBytesB64) : BASE_PDF,
-        cachedStatusListCredential: g.statusListCredential,
-        jwks: BASE_JWKS,
-      });
+      const r = verifyAnnexIvBindOffline(input());
       // A tampered list is NEVER a false not-revoked, NEVER flips valid.
       expect(r.valid).toBe(true);
       expect(r.revocation.checked).toBe(false);
       expect(r.revocation.revoked).toBe(false);
       expect(r.revocation.reason).toBe(g.expectedReason);
+      // …and is never mistakable for a confirmed not-revoked (P2-11).
+      expect(r.trustworthy).toBe(false);
+      expect(r.revocation.malformed).toBeUndefined();
+    });
+
+    it(`${g.guard} + requireRevocationCheck → valid:false, reason="revocation not checked: …"`, () => {
+      const r = verifyAnnexIvBindOffline({ ...input(), requireRevocationCheck: true });
+      expect(r.valid).toBe(false);
+      expect(r.trustworthy).toBe(false);
+      expect(r.reason).toBe(`revocation not checked: ${g.expectedReason}`);
+      // The artifact legs all still passed — ONLY the revocation policy failed it.
+      expect(r.signatureOk && r.byteBindingOk && r.fieldsOk && r.tagOk).toBe(true);
     });
   }
 
@@ -174,4 +214,69 @@ describe("verify-hostile — per-guard tampered status-list table (C-C-8: valid:
     // The cap makes gunzip throw immediately — well under a second.
     expect(Date.now() - start).toBeLessThan(5000);
   });
+});
+
+describe("verify-hostile — P2-11 malformed supplied status list → valid:false + revocation.malformed (loud, not a silent unchecked)", () => {
+  it("the table covers the audit's cases (JSON text, {}, an envelope, a non-object)", () => {
+    expect(FX.malformedLists.length).toBeGreaterThanOrEqual(8);
+  });
+
+  for (const m of FX.malformedLists) {
+    it(`${m.case} → valid:false, reason="${m.expectedReason}"`, () => {
+      const r = verifyAnnexIvBindOffline({
+        sidecarJws: FX.base.sidecarJws,
+        pdfBytes: BASE_PDF,
+        cachedStatusListCredential: m.statusListCredential,
+        jwks: BASE_JWKS,
+      });
+      expect(r.valid).toBe(false);
+      expect(r.trustworthy).toBe(false);
+      expect(r.reason).toBe(m.expectedReason);
+      expect(r.revocation).toEqual({ checked: false, revoked: false, reason: m.expectedReason, malformed: true });
+      // The artifact itself verified — the failure is the caller-supplied list.
+      expect(r.signatureOk && r.byteBindingOk).toBe(true);
+    });
+  }
+
+  it("`undefined` and `null` remain 'not provided' (unchecked, valid stands) — not malformed", () => {
+    for (const absent of [undefined, null]) {
+      const r = verifyAnnexIvBindOffline({
+        sidecarJws: FX.base.sidecarJws,
+        pdfBytes: BASE_PDF,
+        cachedStatusListCredential: absent,
+        jwks: BASE_JWKS,
+      });
+      expect(r.valid).toBe(true);
+      expect(r.trustworthy).toBe(false);
+      expect(r.revocation).toEqual({ checked: false, revoked: false, reason: "status list not provided (offline)" });
+    }
+  });
+});
+
+describe("verify-hostile — P2-12 asymmetry: an authentic REVOCATION bit outside the window is still a confirmed revocation", () => {
+  it("the table covers expired / not-yet-valid / stale / unparseable-window lists", () => {
+    expect(FX.outOfWindowRevocations.length).toBeGreaterThanOrEqual(6);
+  });
+
+  for (const o of FX.outOfWindowRevocations) {
+    for (const requireRevocationCheck of [false, true]) {
+      it(`${o.case}${requireRevocationCheck ? " + requireRevocationCheck" : ""} → valid:false, reason "revoked"`, () => {
+        const r = verifyAnnexIvBindOffline({
+          sidecarJws: FX.base.sidecarJws,
+          pdfBytes: BASE_PDF,
+          cachedStatusListCredential: o.statusListCredential,
+          jwks: BASE_JWKS,
+          requireRevocationCheck,
+          ...rowOptions(o.options),
+        });
+        expect(r.valid).toBe(false);
+        expect(r.reason).toBe("revoked");
+        expect(r.trustworthy).toBe(false);
+        expect(r.revocation.checked).toBe(true);
+        expect(r.revocation.revoked).toBe(true);
+        expect(r.revocation.statusPurpose).toBe("revocation");
+        expect(r.revocation.reason).toBe(o.expectedReason);
+      });
+    }
+  }
 });

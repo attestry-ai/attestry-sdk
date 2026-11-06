@@ -10,5 +10,5 @@
  * deterministic at the cost of a one-line manual sync.
  */
 
-export const PACKAGE_VERSION = "0.1.1";
+export const PACKAGE_VERSION = "0.2.0";
 export const PACKAGE_USER_AGENT = `attestry-otel-agent-compliance/${PACKAGE_VERSION}`;

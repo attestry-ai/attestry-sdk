@@ -100,6 +100,13 @@ const UUID_REGEX =
 const PDF_CONTENT_TYPE = "application/pdf";
 
 /**
+ * Default timeout for {@link AnnexIvResource.generate}: the kernel route's
+ * `maxDuration` (300s). The client-wide 30s default would abort it while
+ * the server keeps working — and a re-call then 422s `already_bound`.
+ */
+export const ANNEX_IV_GENERATE_DEFAULT_TIMEOUT_MS = 300_000;
+
+/**
  * Validate the consumer-supplied `{ technicalFileId }` input synchronously,
  * returning the validated UUID. Throws a documented `TypeError` (the
  * `safe-input-read` idiom) on a non-object input, an absent/non-string
@@ -145,14 +152,20 @@ export class AnnexIvResource {
    * method sends `{}` and adds NO fields (any stray field would 422). The
    * transport adds `x-api-key` + `Content-Type: application/json`.
    *
-   * **SLOW route** (`maxDuration: 300` — up to 9 serial composer narratives).
-   * The SDK does NOT add a per-method timeout (resource methods do not
-   * override per-call timeouts in `@attestry/sdk`). The default
-   * `timeoutMs: 30_000` WILL abort this route. Latency-tolerant callers MUST
-   * construct `new AttestryClient({ timeoutMs: 0 })` (`0` DISABLES the abort
-   * timer) or `{ timeoutMs: >= 300_000 }` (NOT `60_000` — still under the
-   * 300s route ceiling), and/or pass a long-lived `options.signal`. Thread
-   * `options` so `signal`/`retry` compose.
+   * **SLOW route** (`maxDuration: 300` — up to 9 serial composer narratives;
+   * expect it to take minutes). Since 0.8.0 this method defaults to a
+   * **300_000 ms** timeout ({@link ANNEX_IV_GENERATE_DEFAULT_TIMEOUT_MS})
+   * instead of the client's 30s default. Precedence: per-call
+   * `options.timeoutMs` → an explicitly configured client `timeoutMs` →
+   * 300_000. (A client built with e.g. `{ timeoutMs: 60_000 }` applies
+   * that 60s here too — pass `{ timeoutMs: 300_000 }` per call, or `0` to
+   * disable.) `options.signal` composes as usual.
+   *
+   * **On a timeout, do NOT call `generate` again.** The server may still
+   * finish the bind after the client gave up; a second call then fails
+   * with 422 `annex_iv.already_bound` and is metered. Poll
+   * {@link AnnexIvResource.getBind} instead — a non-null `pdfByteSha256`
+   * means the bind completed.
    *
    * @throws {TypeError}          synchronously, on a malformed `input` (no request issued).
    * @throws {AttestryAPIError}   on a non-2xx response (401/403/404/422/429-auto-retried/500); `details` carries the parsed `{success:false,error,details?}` body (the 422 `details` carries the `annex_iv.*` `{code}` — incl. `annex_iv.already_bound` on a re-call for an already-bound file — or `{code:"annex_iv.validation_failed",issues}`).
@@ -169,6 +182,7 @@ export class AnnexIvResource {
       // The route is strict-empty — send `{}`, add NO fields.
       body: {},
       options,
+      defaultTimeoutMs: ANNEX_IV_GENERATE_DEFAULT_TIMEOUT_MS,
     });
   }
 
@@ -181,9 +195,15 @@ export class AnnexIvResource {
    * `new Uint8Array(await result.response.arrayBuffer())` to feed the offline
    * verifier.
    *
+   * **Timeout** (0.8.0): the client `timeoutMs` (default 30s; per-call
+   * `options.timeoutMs` overrides, `0` disables) and `options.signal` cover
+   * the request AND your read of the body — read or cancel it promptly. If
+   * the deadline passes mid-download, the body read rejects with
+   * `AttestryError("request timed out")`.
+   *
    * @throws {TypeError}          synchronously, on a malformed `input`.
    * @throws {AttestryAPIError}   on a non-2xx (404 not generated / 502 object missing / 500 integrity mismatch) — drained + thrown BEFORE the content-type guard; a wrong-content-type 2xx → `AttestryAPIError(status, null)`.
-   * @throws {AttestryError}      on a network failure.
+   * @throws {AttestryError}      on a network failure / timeout.
    */
   downloadPdf(
     input: DownloadAnnexIvPdfInput,
@@ -195,6 +215,7 @@ export class AnnexIvResource {
         path: `/api/v1/technical-files/${encodeURIComponent(id)}/annex-iv/pdf`,
         expectedContentType: PDF_CONTENT_TYPE,
         options,
+        applyTimeout: true,
       })
       .then((response) => ({
         contentType: PDF_CONTENT_TYPE,

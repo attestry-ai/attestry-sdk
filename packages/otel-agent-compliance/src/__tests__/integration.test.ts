@@ -1,6 +1,7 @@
 /**
- * Integration test against a real `BasicTracerProvider` from
- * `@opentelemetry/sdk-trace-base`. Verifies the exporter actually
+ * Integration test against a real `TracerProvider` from
+ * `@opentelemetry/sdk-trace` (the successor of the deprecated
+ * `@opentelemetry/sdk-trace-base`). Verifies the exporter actually
  * implements the SpanProcessor contract correctly — the unit tests
  * above use fakes that match our reading of the contract; this test
  * proves that reading is right by feeding spans from a real tracer.
@@ -11,14 +12,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AttestryDecisionExporter } from "../exporter.js";
+import { kernelBulkResponse } from "./fakes.js";
 
 let SDK_AVAILABLE = false;
-let BasicTracerProvider: typeof import("@opentelemetry/sdk-trace-base").BasicTracerProvider;
+let TracerProvider: typeof import("@opentelemetry/sdk-trace").TracerProvider;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  ({ BasicTracerProvider } = await import(
-    "@opentelemetry/sdk-trace-base"
-  ));
+  ({ TracerProvider } = await import("@opentelemetry/sdk-trace"));
   SDK_AVAILABLE = true;
 } catch {
   SDK_AVAILABLE = false;
@@ -30,7 +29,7 @@ const VALID_CONFIG = {
   systemId: "00000000-0000-0000-0000-000000000001",
 };
 
-describe.skipIf(!SDK_AVAILABLE)("integration with BasicTracerProvider", () => {
+describe.skipIf(!SDK_AVAILABLE)("integration with TracerProvider", () => {
   let captured: { url: string; init?: RequestInit }[] = [];
 
   beforeEach(() => {
@@ -39,10 +38,9 @@ describe.skipIf(!SDK_AVAILABLE)("integration with BasicTracerProvider", () => {
       .fn()
       .mockImplementation(async (url: string, init?: RequestInit) => {
         captured.push({ url, init });
-        return new Response(
-          JSON.stringify({ totalInserted: 1, totalFailed: 0 }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
+        // Real kernel envelope (successResponse → { success, data }).
+        const items = JSON.parse(init?.body as string).items as unknown[];
+        return kernelBulkResponse({ submitted: items.length });
       });
   });
 
@@ -56,7 +54,7 @@ describe.skipIf(!SDK_AVAILABLE)("integration with BasicTracerProvider", () => {
       batchSize: 1,
       batchInterval: 999_999,
     });
-    const provider = new BasicTracerProvider({
+    const provider = new TracerProvider({
       spanProcessors: [exporter],
     });
     const tracer = provider.getTracer("test");
@@ -84,7 +82,7 @@ describe.skipIf(!SDK_AVAILABLE)("integration with BasicTracerProvider", () => {
       batchSize: 100, // never trip size-based flush
       batchInterval: 999_999,
     });
-    const provider = new BasicTracerProvider({
+    const provider = new TracerProvider({
       spanProcessors: [exporter],
     });
     const tracer = provider.getTracer("test");

@@ -35,6 +35,12 @@ interface InternalRequestArgs {
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
   options?: RequestOptions;
+  /**
+   * Per-method default timeout for slow routes (e.g. `annexIv.generate`).
+   * Applies only when neither `options.timeoutMs` nor an explicit client
+   * `timeoutMs` is set.
+   */
+  defaultTimeoutMs?: number;
 }
 
 export class AttestryClient {
@@ -96,6 +102,10 @@ export class AttestryClient {
     headers?: Record<string, string>;
     options?: RequestOptions;
     expectedContentType?: string;
+    /** One-shot download: keep the request timeout armed until the body is read. */
+    applyTimeout?: boolean;
+    /** With `applyTimeout`: per-method default timeout (see `_request`'s `defaultTimeoutMs`). */
+    defaultTimeoutMs?: number;
   }): Promise<Response> {
     return transportStreamRequest({ config: this._config, ...args });
   }

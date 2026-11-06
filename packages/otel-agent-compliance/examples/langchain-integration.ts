@@ -13,8 +13,8 @@
  *
  * What this example demonstrates:
  *  1. Initializing `NodeSDK` with `AttestryDecisionExporter` as the
- *     SpanProcessor. (`@opentelemetry/sdk-node` is the peer dep —
- *     install separately.)
+ *     SpanProcessor. (`@opentelemetry/sdk-node` is not a dependency of
+ *     this package — install it separately; see README "Compatibility".)
  *  2. Manually creating spans that look like LangChain's
  *     OpenInference instrumentation — `gen_ai.operation.name`,
  *     `tool.name`, `input`/`output` attributes.
@@ -30,9 +30,10 @@
  */
 
 import { trace } from "@opentelemetry/api";
-// `@opentelemetry/sdk-node` is a peer dep. Customers install it
-// alongside this package. We import lazily inside main() so this file
-// type-checks even when the peer isn't installed in the dev tree.
+// `@opentelemetry/sdk-node` is installed by the customer alongside this
+// package (it is not one of its dependencies). We import lazily inside
+// main() so this file type-checks even when it isn't installed in the
+// dev tree.
 import { AttestryDecisionExporter } from "../src/index.js";
 
 async function main() {
@@ -40,7 +41,7 @@ async function main() {
   const systemId = process.env.ATTESTRY_SYSTEM_ID;
   const apiUrl =
     process.env.ATTESTRY_API_URL ??
-    "https://attestry.app/api/v1/decisions/bulk";
+    "https://attestry.ai/api/v1/decisions/bulk";
 
   if (!apiKey || !systemId) {
     console.error(
@@ -108,11 +109,14 @@ async function main() {
     span.end();
   });
 
-  // Drain in-flight spans before exit.
+  // Drain in-flight spans before exit. Failed or partially rejected
+  // batches are reported through the exporter's logger (console.warn by
+  // default) — nothing is dropped silently.
   await sdk.shutdown();
   console.log(
-    "[example] decisions submitted. Verify at " +
-      "https://attestry.app/dashboard/decisions",
+    "[example] decisions submitted. List them with " +
+      `GET ${new URL(`/api/v1/decisions?systemId=${systemId}`, apiUrl).href} ` +
+      "(x-api-key with read:assessments).",
   );
 }
 

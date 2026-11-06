@@ -267,8 +267,15 @@ function parseFrameBlock(block: string): SSEFrame | null {
 /**
  * Frame-boundary regex — matches `\r\n\r\n`, `\n\n`, or `\r\r` per spec.
  * Exported only for tests.
+ *
+ * MUST stay non-global and non-sticky (no `g` / `y` flag). `parseSSE` calls
+ * `.exec(buffer)` on a buffer it re-slices after every match, and this
+ * regex is shared module-wide by every concurrent stream. With `g`, `exec`
+ * resumed at a stale `lastIndex`: frames coalesced into one network chunk
+ * were merged or skipped, and a stream abandoned mid-chunk made the next
+ * stream in the process miss its boundary and hang (fixed in 0.8.0).
  */
-const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/g;
+const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
 
 /**
  * Parse a `data:` payload as JSON. Throws `AttestryError` (with the

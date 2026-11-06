@@ -1,6 +1,9 @@
 /**
  * AttestryDecisionExporter — implements the OpenTelemetry SpanProcessor
- * interface from `@opentelemetry/sdk-trace-base`. Customers register
+ * interface (OTel JS 2.x and 3.x) structurally, via the local
+ * `SpanProcessorLike` / `ReadableSpanLike` / `SpanLike` types in
+ * `types.ts`. The package has no `@opentelemetry/*` dependency or peer at
+ * all (see the note there for why). Customers register
  * one instance with their TracerProvider; every ended span flows
  * through `onEnd`, gets queued if it looks like an AI decision, and
  * is flushed to the Attestry batch ingest endpoint in batches.
@@ -21,6 +24,15 @@
  *  - **Per-span work is bounded.** The exporter does NOT record raw
  *    span input/output text — it records a sha256 digest of each.
  *    A 100KB tool output becomes 64 hex chars in the wire payload.
+ *  - **Digests cover the REDACTED input.** The sanitizer runs first and
+ *    the digests are computed over its output, never over the raw
+ *    attributes. A sha256 of a low-entropy raw value (an email, phone,
+ *    SSN, card number) is a fingerprint that can be reversed by
+ *    dictionary / brute force, so hashing raw input would leak the PII
+ *    the sanitizer exists to remove. This is the spec'd contract
+ *    (AGENT_COMPLIANCE_KERNEL_PLAN.md §15.2: sanitize, then hash
+ *    `attrs.input`). Consequence: an auditor reproduces a digest by
+ *    running the same sanitizer over the original input.
  *  - **Decision detection runs synchronously in `onEnd`.** The async
  *    network call happens later in `flush`. We never block the OTel
  *    pipeline on I/O.
@@ -34,11 +46,6 @@
  *    the first to finish, then re-checks the queue.
  */
 
-import type {
-  ReadableSpan,
-  Span,
-  SpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
 import { createHash } from "node:crypto";
 
 import { AttestryClient, safeLog } from "./client.js";
@@ -48,7 +55,10 @@ import type {
   AttestryExporterConfig,
   DecisionInput,
   ExporterLogger,
+  ReadableSpanLike,
   SpanFrameworkContext,
+  SpanLike,
+  SpanProcessorLike,
 } from "./types.js";
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -85,7 +95,7 @@ const consoleLogger: ExporterLogger = {
   },
 };
 
-export class AttestryDecisionExporter implements SpanProcessor {
+export class AttestryDecisionExporter implements SpanProcessorLike {
   private readonly client: AttestryClient;
   private readonly logger: ExporterLogger;
   private readonly batchSize: number;
@@ -99,7 +109,7 @@ export class AttestryDecisionExporter implements SpanProcessor {
   ) => ReturnType<typeof tagWithFrameworks>;
   private readonly decider: (ctx: SpanFrameworkContext) => boolean;
 
-  private queue: ReadableSpan[] = [];
+  private queue: ReadableSpanLike[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushInFlight: Promise<void> | null = null;
   private shutdownCalled = false;
@@ -138,7 +148,7 @@ export class AttestryDecisionExporter implements SpanProcessor {
 
   // ─── SpanProcessor API ───────────────────────────────────────────
 
-  onStart(span: Span): void {
+  onStart(span: SpanLike): void {
     try {
       span.setAttribute("attestry.system_id", this.config.systemId);
     } catch (err) {
@@ -150,7 +160,7 @@ export class AttestryDecisionExporter implements SpanProcessor {
     }
   }
 
-  onEnd(span: ReadableSpan): void {
+  onEnd(span: ReadableSpanLike): void {
     if (this.shutdownCalled) return;
     try {
       const ctx: SpanFrameworkContext = {
@@ -255,7 +265,7 @@ export class AttestryDecisionExporter implements SpanProcessor {
     }
   }
 
-  private spanToDecision(span: ReadableSpan): DecisionInput {
+  private spanToDecision(span: ReadableSpanLike): DecisionInput {
     const rawAttrs: Record<string, unknown> = { ...span.attributes };
     const sanitized = this.sanitizer(rawAttrs);
 
@@ -280,6 +290,9 @@ export class AttestryDecisionExporter implements SpanProcessor {
     // slice keeps the partial claim list (better than zero claims).
     const frameworkClaims = this.tagger(ctx).slice(0, FRAMEWORK_CLAIMS_CAP);
 
+    // Digests are computed over the SANITIZED bag on purpose — never
+    // pass `rawAttrs` here (see "Digests cover the REDACTED input" in
+    // the header comment).
     const inputDigest = computeInputDigest(sanitized);
     const outputDigest = computeOutputDigest(sanitized);
 
@@ -338,6 +351,10 @@ function defaultDecider(ctx: SpanFrameworkContext): boolean {
   return false;
 }
 
+/**
+ * `attrs` MUST be the sanitizer's output (redacted), not the raw span
+ * attributes — see "Digests cover the REDACTED input" above.
+ */
 function computeInputDigest(attrs: Record<string, unknown>): string {
   // Default to `{}` (empty object) on missing input — matches the
   // spec's `JSON.stringify(attrs['input'] ?? {})` behavior in

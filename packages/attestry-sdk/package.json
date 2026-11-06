@@ -1,6 +1,6 @@
 {
   "name": "@attestry/sdk",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Official TypeScript SDK for the Attestry compliance kernel — generate and offline-verify sealed EU AI Act Annex IV technical files, submit AI incidents, fetch decision records, and run CI/CD compliance gates.",
   "license": "Apache-2.0",
   "repository": {
@@ -11,9 +11,33 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./annex-iv-verify": {
+      "types": "./dist/annex-iv-verify/index.d.ts",
+      "default": "./dist/annex-iv-verify/index.js"
+    },
+    "./dist/*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "imports": {
+    "#annex-iv-verify/zlib": {
+      "types": "./dist/annex-iv-verify/zlib-node.d.ts",
+      "node": "./dist/annex-iv-verify/zlib-node.js",
+      "default": "./dist/annex-iv-verify/zlib-portable.js"
+    }
+  },
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "keywords": [
@@ -30,6 +54,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "test:shuffle": "vitest run --sequence.shuffle",
     "test:watch": "vitest",
     "prepare": "npm run build"
   },
@@ -41,9 +66,9 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.12"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   }
 }
