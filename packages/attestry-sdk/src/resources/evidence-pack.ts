@@ -174,6 +174,15 @@ const EXPORT_CONTENT_TYPES: Record<ExportFormat, string> = {
   zip: "application/zip",
 };
 
+/**
+ * Default timeout for {@link EvidencePackResource.export} (0.8.0): twice the
+ * kernel export route's `maxDuration` (60s), so a large zip that the server
+ * finishes streaming inside its own limit is never cut off client-side,
+ * while a stalled download still ends. The client's 30s default would be
+ * shorter than the route allows.
+ */
+export const EVIDENCE_PACK_EXPORT_DEFAULT_TIMEOUT_MS = 120_000;
+
 // ─── Closed-spec ceiling constants (drift-pinned in Round 2) ────────────────
 
 /**
@@ -2343,9 +2352,14 @@ export class EvidencePackResource {
    * **Auth**: READ_ASSESSMENTS. **Revoked packs are exportable** (the
    * artifact carries `status:'revoked'` verbatim — no filtering).
    *
-   * **No internal timeout** — the streaming transport does not arm the
-   * 30s default (a large zip can take longer). Pass `options.signal` from
-   * your own `AbortController` to bound the duration.
+   * **Timeout** (0.8.0; previously none) — defaults to **120_000 ms**
+   * ({@link EVIDENCE_PACK_EXPORT_DEFAULT_TIMEOUT_MS}, twice the route's 60s
+   * `maxDuration`), and covers the request AND your read of the returned
+   * body: read or cancel it promptly. If the deadline passes mid-download,
+   * the body read rejects with `AttestryError("request timed out")`.
+   * Precedence: per-call `options.timeoutMs` → an explicitly configured
+   * client `timeoutMs` → 120_000; `0` disables it. `options.signal` also
+   * stays in force until the body has been read.
    *
    * Errors — ordered by kernel firing precedence. **The query-schema parse
    * runs BEFORE auth** in this route, so an absent/unknown `format` 422s
@@ -2362,6 +2376,8 @@ export class EvidencePackResource {
    *   - `AttestryAPIError` (status 404) — pack missing OR cross-org.
    *   - `AttestryAPIError` (status 500) — internal kernel error.
    *   - `AttestryError` ("request aborted by caller") — abort.
+   *   - `AttestryError` ("request timed out") — the timeout elapsed, before
+   *     the headers or while the body was being read.
    *   - `AttestryAPIError` (transport guard) — a 2xx with the wrong
    *     `Content-Type` for the requested format.
    *   - `TypeError` (synchronous, no fetch issued) — input failed
@@ -2453,13 +2469,17 @@ export class EvidencePackResource {
     // body and throws AttestryAPIError BEFORE the guard runs). The SDK
     // does NOT consume/validate the body (faithful courier; DEV-73). The
     // canonical `contentType` is surfaced from EXPORT_CONTENT_TYPES — the
-    // guard guarantees the response MIME equals it.
+    // guard guarantees the response MIME equals it. `applyTimeout` keeps the
+    // deadline (and the caller's signal) armed until the consumer has read
+    // the body — a one-shot download, not a long-lived stream (0.8.0).
     return this.client
       ._streamRequest({
         path,
         query: { format: validatedFormat },
         expectedContentType,
         options,
+        applyTimeout: true,
+        defaultTimeoutMs: EVIDENCE_PACK_EXPORT_DEFAULT_TIMEOUT_MS,
       })
       .then((response) => ({
         format: validatedFormat,

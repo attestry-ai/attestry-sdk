@@ -224,12 +224,17 @@ export {
 } from "./resources/annex-iv.js";
 
 // The bundled PURE offline verifier — a TOP-LEVEL export (no apiKey/transport/
-// network), NOT a client method (C-D5).
+// network), NOT a client method (C-D5). Prefer the dedicated subpath
+// `@attestry/sdk/annex-iv-verify` (same symbols); this root re-export is kept for
+// compatibility and no longer pulls `node:zlib` into non-Node bundles.
 export {
   verifyAnnexIvBindOffline,
   makeJwksResolver,
+  STATUS_LIST_VALIDITY_MS,
+  DEFAULT_STATUS_LIST_CLOCK_TOLERANCE_MS,
   type VerifyAnnexIvBindOfflineInput,
   type VerifyAnnexIvBindResult,
+  type RevocationCheck,
   type PublicKeyResolver,
   type Ed25519PublicJwk,
   type AnnexIvBindPayload,

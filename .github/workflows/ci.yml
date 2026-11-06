@@ -1,0 +1,209 @@
+# CI for the public Attestry SDK repo (attestry-ai/attestry-sdk). It NEVER
+# publishes. Publishing is publish-packages.yml, on tags only.
+#
+# AUTHORED in the private monorepo at
+# scripts/publish/mirror-root/github/workflows/ci.yml and byte-mirrored to
+# .github/workflows/ci.yml by scripts/publish/generate-publish-mirror.sh.
+# Edit it there, never in the mirror. It lives outside the monorepo's own
+# .github/ so it does not run there.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: ${{ matrix.package }} · Node ${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [attestry-sdk, otel-agent-compliance, mcp-server]
+        node: ["20.19", "22", "24", "26"]
+        os: [ubuntu-24.04]
+        exclude:
+          - { package: mcp-server, node: "26" }
+        include:
+          - { package: attestry-sdk, node: "24", os: macos-latest }
+          - { package: attestry-sdk, node: "24", os: windows-latest }
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/${{ matrix.package }}
+    steps:
+      - name: Keep LF line endings (byte-identity fixtures)
+        if: runner.os == 'Windows'
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/${{ matrix.package }}/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: |
+          if [ "$(npm pkg get scripts.typecheck)" != "{}" ]; then
+            npm run typecheck
+          else
+            npx --no-install tsc --noEmit -p tsconfig.json
+          fi
+
+      - name: Test
+        run: npm test
+
+      # Random test order: catches order-dependent state such as the module-level
+      # /g regex in the SSE parser (fixed in 0.8.0). Skipped until the package
+      # defines the script.
+      - name: Test (shuffled order)
+        if: matrix.package == 'attestry-sdk'
+        run: |
+          if [ "$(npm pkg get scripts.test:shuffle)" = "{}" ]; then
+            echo "::notice::no test:shuffle script in $(npm pkg get name); skipping"
+          else
+            npm run test:shuffle
+          fi
+
+      - name: Pack (dry run)
+        run: npm pack --dry-run
+
+      # The MCP server is a stdio bin with no exports: install the packed
+      # tarball into a fresh project and run an MCP handshake against it.
+      - name: Smoke — MCP stdio handshake from the packed tarball
+        if: matrix.package == 'mcp-server'
+        run: |
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/mcp-smoke" && cd "$RUNNER_TEMP/mcp-smoke"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/attestry-mcp-server-*.tgz
+          node "$GITHUB_WORKSPACE/.github/scripts/mcp-stdio-smoke.mjs" node_modules/@attestry/mcp-server
+
+  # What a user does: install the packed package next to the LATEST
+  # @opentelemetry/sdk-node of each major OTel JS line, with npm's default
+  # (strict) peer resolution, then type-check (skipLibCheck off) and run a
+  # NodeSDK smoke test against a local capture server.
+  otel-peers:
+    name: otel-agent-compliance · OpenTelemetry ${{ matrix.otel }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - otel: "2.x"
+            sdk-node: ">=0.200.0 <0.300.0"
+            api: ">=1.9.0 <1.10.0"
+          - otel: "3.x"
+            sdk-node: ">=0.300.0 <0.400.0"
+            api: ">=1.10.0 <1.11.0"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24 # OTel JS 3.x needs >= 22.15
+          cache: npm
+          cache-dependency-path: packages/otel-agent-compliance/package-lock.json
+
+      - name: Build and pack
+        working-directory: packages/otel-agent-compliance
+        run: |
+          npm ci
+          npm run build
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+
+      - name: Install into a fresh project (strict peers)
+        env:
+          SDK_NODE_RANGE: ${{ matrix.sdk-node }}
+          API_RANGE: ${{ matrix.api }}
+        run: |
+          sdk_node="$(npm view "@opentelemetry/sdk-node@$SDK_NODE_RANGE" version --json | node -e '
+            const v = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            console.log(Array.isArray(v) ? v[v.length - 1] : v);')"
+          echo "latest @opentelemetry/sdk-node in $SDK_NODE_RANGE: $sdk_node"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm pkg set type=module
+          npm install --no-audit --no-fund \
+            "$RUNNER_TEMP"/attestry-otel-agent-compliance-*.tgz \
+            "@opentelemetry/sdk-node@$sdk_node" \
+            "@opentelemetry/api@$API_RANGE" \
+            typescript@^5 @types/node@^22
+          npm ls @opentelemetry/api @opentelemetry/sdk-node @attestry/otel-agent-compliance
+
+      - name: Type-check and run the NodeSDK smoke test
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          cat > smoke.ts <<'EOF'
+          import { createServer } from "node:http";
+          import type { AddressInfo } from "node:net";
+          import { trace } from "@opentelemetry/api";
+          import { NodeSDK } from "@opentelemetry/sdk-node";
+          import { AttestryDecisionExporter } from "@attestry/otel-agent-compliance";
+
+          const bodies: string[] = [];
+          const server = createServer((req, res) => {
+            let body = "";
+            req.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+            req.on("end", () => {
+              bodies.push(body);
+              res.writeHead(200, { "content-type": "application/json" });
+              res.end(JSON.stringify({ success: true, data: { totalInserted: 1, totalFailed: 0, failed: [] } }));
+            });
+          });
+          await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+          const { port } = server.address() as AddressInfo;
+
+          const exporter = new AttestryDecisionExporter({
+            apiUrl: `http://127.0.0.1:${port}/api/v1/decisions/bulk`,
+            apiKey: "ci-smoke-key",
+            systemId: "ci-smoke-system",
+            batchSize: 1,
+            shouldRecordAsDecision: () => true,
+          });
+          const sdk = new NodeSDK({ spanProcessors: [exporter], instrumentations: [] });
+          sdk.start();
+          trace.getTracer("ci-smoke").startSpan("llm.completion", { attributes: { "gen_ai.operation.name": "chat" } }).end();
+          await exporter.forceFlush();
+          await sdk.shutdown();
+          server.close();
+
+          if (bodies.length < 1 || !bodies[0].includes("ci-smoke-system")) {
+            console.error(`smoke FAILED: captured ${bodies.length} request(s)`, bodies[0]?.slice(0, 300));
+            process.exit(1);
+          }
+          console.log(`smoke OK: ${bodies.length} request(s) captured`);
+          EOF
+          npx --no-install tsc --strict --target es2022 --module nodenext --moduleResolution nodenext --types node --outDir out smoke.ts
+          node out/smoke.js

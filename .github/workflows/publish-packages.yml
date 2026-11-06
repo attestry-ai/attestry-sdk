@@ -1,34 +1,49 @@
-# npm publish with provenance — @attestry/sdk + @attestry/otel-agent-compliance
-# (W1 deliverable 5; roadmap :84 — GitHub Actions OIDC + Sigstore attestation).
+# npm publish with provenance — @attestry/sdk, @attestry/otel-agent-compliance
+# and @attestry/mcp-server
+# (W1 deliverable 5; roadmap :84 — GitHub Actions OIDC + Sigstore attestation;
+# hardened per the 2026-11-05 audit, P1-7 / P3-18 / P3-19).
 #
 # WHERE THIS RUNS: the PUBLIC mirror repo (attestry-ai/attestry-sdk). npm
 # provenance requires a public source repo whose URL matches each package's
-# `repository` field — the private kernel repo cannot mint it. This file rides
-# the kernel tree as the AUTHORED SOURCE of the workflow (and is byte-mirrored
-# out); on the kernel remote it is INERT — no `sdk-v*`/`otel-v*` tag is ever
-# pushed there, and without the npm secret/OIDC the worst case is a red run,
-# never a publish.
+# `repository` field, which the private monorepo cannot provide. This file is
+# AUTHORED in the private monorepo (at .github/workflows/) and is
+# byte-mirrored out by scripts/publish/generate-publish-mirror.sh; edit it
+# there, never in the mirror. On the monorepo it is INERT: every job is gated
+# on `github.repository == 'attestry-ai/attestry-sdk'`.
 #
-# AUTH (first publish vs steady state): npm cannot pre-configure Trusted
-# Publishing for a package name that has never been published (npm/cli#8544) —
-# the FIRST publish of each name authenticates with a founder-provisioned
-# granular automation token (NODE_AUTH_TOKEN secret); provenance is still
-# minted (the --provenance flag + the job's OIDC id-token drive Sigstore,
-# independent of the auth method). After the names exist, the founder
-# configures Trusted Publishing and the token secret can be removed — the
-# setup-node registry config then falls through to OIDC.
+# AUTH: npm Trusted Publishing (OIDC). No npm token is used anywhere. The
+# publish job's GitHub OIDC id-token is exchanged by the npm CLI for a
+# short-lived credential scoped to the one package being published. That
+# needs npm >= 11.5.1, which ships with Node 24 (Node 22 bundles npm 10.9.9,
+# which has no OIDC support). npm grants the credential only when the run
+# matches the Trusted Publisher configured on npmjs.com for that package:
+# GitHub Actions, org `attestry-ai`, repo `attestry-sdk`, workflow
+# `publish-packages.yml`, environment `npm-publish`. The same id-token also
+# signs the Sigstore provenance statement (`--provenance`). See
+# scripts/publish/RELEASE.md for the one-time npmjs.com setup.
 #
-# GUARDS (Gate-1 audit C4): each tag routes to exactly its own package's job,
-# and a version==tag assertion hard-fails a mis-tag BEFORE anything publishes —
-# `npm publish` reads package.json, never the git tag, so an unguarded tag on a
-# pre-bump commit would otherwise publish wrong bytes immutably under a tag the
-# registry and git permanently disagree on.
+# LEAST PRIVILEGE (two jobs):
+#   build    contents: read, no id-token. Maps the tag to its package, checks
+#            tag version == package.json version and that the tagged commit
+#            is on main, then runs npm ci / build / test / npm pack and
+#            uploads the single tarball. Third-party code (dependency install
+#            scripts, the test runner) runs only in this job, where it cannot
+#            mint a publish credential.
+#   publish  id-token: write, environment `npm-publish` (configure required
+#            reviewers on it). No checkout, no npm install, no lifecycle
+#            scripts. It downloads the tarball, re-checks its sha256/name/
+#            version, and runs `npm publish <tgz> --provenance`.
 #
-# PRE-TAG GATE (Gate-1 audit C3/C5, executed BEFORE the founder pushes a tag —
-# see the W1 closeout plan §3): kernel↔mirror sha256 manifest diff EMPTY, then
-# per package `npm ci && build && test && npm pack` + tarball-manifest
-# inspection + packed-tarball smoke-install. Verification precedes
-# immutability; this workflow is the LAST gate, not the only one.
+# GUARDS (Gate-1 audit C4): a tag routes to exactly one package, and the
+# version == tag check hard-fails a mis-tag BEFORE anything is published.
+# `npm publish` reads package.json, never the git tag, so an unguarded tag on
+# a pre-bump commit would publish the wrong bytes, permanently, under a
+# version that the registry and git disagree on.
+#
+# PRE-TAG GATE (scripts/publish/RELEASE.md): mirror from origin/main through
+# the byte-identity gate, open a PR on the mirror with CI green, merge, re-run
+# the gate with --verify-only, then tag. This workflow is the LAST gate, not
+# the only one.
 
 name: Publish packages (npm provenance)
 
@@ -37,92 +52,223 @@ on:
     tags:
       - "sdk-v*"
       - "otel-v*"
+      - "mcp-v*"
 
-permissions:
-  id-token: write # Sigstore provenance
-  contents: read
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  publish-sdk:
-    name: Publish @attestry/sdk
-    if: startsWith(github.ref_name, 'sdk-v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: packages/attestry-sdk
+  build:
+    name: Build, test & pack ${{ github.ref_name }}
+    if: github.repository == 'attestry-ai/attestry-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      name: ${{ steps.resolve.outputs.name }}
+      version: ${{ steps.resolve.outputs.version }}
+      dist-tag: ${{ steps.resolve.outputs.dist-tag }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
+      - name: Map tag to package
+        id: resolve
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            sdk-v*)  dir=packages/attestry-sdk;          name=@attestry/sdk;                    version="${TAG#sdk-v}" ;;
+            otel-v*) dir=packages/otel-agent-compliance; name=@attestry/otel-agent-compliance; version="${TAG#otel-v}" ;;
+            mcp-v*)  dir=packages/mcp-server;            name=@attestry/mcp-server;             version="${TAG#mcp-v}" ;;
+            *) echo "::error::tag '$TAG' maps to no package"; exit 1 ;;
+          esac
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '$TAG' does not end in a semver version"; exit 1
+          fi
+          # A prerelease must never become `latest`.
+          case "$version" in *-*) dist_tag=next ;; *) dist_tag=latest ;; esac
+          {
+            echo "dir=$dir"
+            echo "name=$name"
+            echo "version=$version"
+            echo "dist-tag=$dist_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag $TAG -> $name@$version ($dir, dist-tag $dist_tag)"
+
       - name: Checkout (the tagged commit)
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history, for the on-main guard
+
+      - name: Guard — tagged commit must be on main
+        run: |
+          commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::$commit is not on main. Tag only commits merged to main."
+            exit 1
+          fi
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
+          node-version: 24
+          package-manager-cache: false # no cache in a release build (cache poisoning)
 
-      - name: Guard — package.json version must equal the tag
+      - name: Guard — package.json name/version must equal the tag
+        working-directory: ${{ steps.resolve.outputs.dir }}
+        env:
+          EXPECTED_NAME: ${{ steps.resolve.outputs.name }}
+          EXPECTED_VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#sdk-v}"
+          PKG_NAME="$(node -p "require('./package.json').name")"
           PKG_VERSION="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG_VERSION package.json=$PKG_VERSION"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::version/tag mismatch — refusing to publish ($TAG_VERSION != $PKG_VERSION)"
+          echo "tag=$EXPECTED_NAME@$EXPECTED_VERSION package.json=$PKG_NAME@$PKG_VERSION"
+          if [ "$PKG_NAME" != "$EXPECTED_NAME" ] || [ "$PKG_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::package/tag mismatch — refusing to publish (tag says $EXPECTED_NAME@$EXPECTED_VERSION, package.json says $PKG_NAME@$PKG_VERSION)"
+            exit 1
+          fi
+          if [ -n "$(npm view "$EXPECTED_NAME@$EXPECTED_VERSION" version 2>/dev/null || true)" ]; then
+            echo "::error::$EXPECTED_NAME@$EXPECTED_VERSION is already on npm (versions are immutable)"
             exit 1
           fi
 
       - name: Install
+        working-directory: ${{ steps.resolve.outputs.dir }}
         run: npm ci
 
       - name: Build
+        working-directory: ${{ steps.resolve.outputs.dir }}
         run: npm run build
 
       - name: Test
+        working-directory: ${{ steps.resolve.outputs.dir }}
         run: npm test
 
-      - name: Publish (provenance)
-        run: npm publish --provenance --access public
+      - name: Pack
+        id: pack
+        working-directory: ${{ steps.resolve.outputs.dir }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  publish-otel:
-    name: Publish @attestry/otel-agent-compliance
-    if: startsWith(github.ref_name, 'otel-v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: packages/otel-agent-compliance
-    steps:
-      - name: Checkout (the tagged commit)
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Guard — package.json version must equal the tag
+          EXPECTED_NAME: ${{ steps.resolve.outputs.name }}
+          EXPECTED_VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#otel-v}"
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG_VERSION package.json=$PKG_VERSION"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::version/tag mismatch — refusing to publish ($TAG_VERSION != $PKG_VERSION)"
-            exit 1
-          fi
+          out="$RUNNER_TEMP/pack"
+          mkdir -p "$out"
+          # Already built above; pack exactly that dist (skip prepare/prepack).
+          npm pack --ignore-scripts --pack-destination "$out"
+          shopt -s nullglob
+          files=("$out"/*.tgz)
+          if [ "${#files[@]}" -ne 1 ]; then echo "::error::expected 1 tarball, found ${#files[@]}"; exit 1; fi
+          tgz="${files[0]}"
+          tar -xOzf "$tgz" package/package.json | node -e '
+            const m = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const want = process.env.EXPECTED_NAME + "@" + process.env.EXPECTED_VERSION;
+            const got = m.name + "@" + m.version;
+            if (got !== want) { console.error("::error::tarball is " + got + ", expected " + want); process.exit(1); }'
+          if ! tar -tzf "$tgz" | grep -q '^package/dist/'; then echo "::error::tarball has no dist/"; exit 1; fi
+          sha="$(sha256sum "$tgz" | cut -d' ' -f1)"
+          echo "tarball=$(basename "$tgz")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $EXPECTED_NAME@$EXPECTED_VERSION"
+            echo "- tarball: \`$(basename "$tgz")\`"
+            echo "- sha256: \`$sha\`"
+            echo "- files: $(tar -tzf "$tgz" | wc -l | tr -d ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Install
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-      - name: Publish (provenance)
-        run: npm publish --provenance --access public
+      - name: Smoke — install the tarball into a fresh project and exercise it
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          EXPECTED_NAME: ${{ steps.resolve.outputs.name }}
+          TARBALL: ${{ runner.temp }}/pack/${{ steps.pack.outputs.tarball }}
+        run: |
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke" && cd "$smoke"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$TARBALL"
+          case "$EXPECTED_NAME" in
+            @attestry/mcp-server)
+              # A stdio server with no exports: run its bin through an MCP
+              # handshake (initialize + tools/list) instead of importing it.
+              node "$GITHUB_WORKSPACE/.github/scripts/mcp-stdio-smoke.mjs" "node_modules/$EXPECTED_NAME" ;;
+            *)
+              node --input-type=module -e '
+                const m = await import(process.env.EXPECTED_NAME);
+                const names = Object.keys(m);
+                if (names.length === 0) { console.error("::error::package has no exports"); process.exit(1); }
+                console.log(process.env.EXPECTED_NAME + " exports: " + names.sort().join(", "));' ;;
+          esac
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/pack/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ needs.build.outputs.name }}@${{ needs.build.outputs.version }}
+    needs: build
+    if: github.repository == 'attestry-ai/attestry-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/${{ needs.build.outputs.name }}/v/${{ needs.build.outputs.version }}
+    permissions:
+      id-token: write # npm Trusted Publishing (OIDC) + Sigstore provenance
+    steps:
+      - name: Download tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/pack
+
+      - name: Setup Node.js 24 (bundled npm supports Trusted Publishing)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Guard — npm >= 11.5.1
+        run: |
+          v="$(npm --version)"
+          echo "npm $v"
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)));
+            process.exit(ok ? 0 : 1);' "$v" \
+            || { echo "::error::npm $v cannot use Trusted Publishing (needs >= 11.5.1)"; exit 1; }
+
+      - name: Verify tarball (sha256, name, version)
+        id: verify
+        env:
+          EXPECTED_NAME: ${{ needs.build.outputs.name }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+          EXPECTED_TARBALL: ${{ needs.build.outputs.tarball }}
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/pack/*.tgz)
+          if [ "${#files[@]}" -ne 1 ]; then echo "::error::expected 1 tarball, found ${#files[@]}"; exit 1; fi
+          tgz="${files[0]}"
+          if [ "$(basename "$tgz")" != "$EXPECTED_TARBALL" ]; then echo "::error::got $(basename "$tgz"), expected $EXPECTED_TARBALL"; exit 1; fi
+          sha="$(sha256sum "$tgz" | cut -d' ' -f1)"
+          if [ "$sha" != "$EXPECTED_SHA256" ]; then echo "::error::sha256 $sha != build job's $EXPECTED_SHA256"; exit 1; fi
+          tar -xOzf "$tgz" package/package.json | node -e '
+            const m = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const want = process.env.EXPECTED_NAME + "@" + process.env.EXPECTED_VERSION;
+            const got = m.name + "@" + m.version;
+            if (got !== want) { console.error("::error::tarball is " + got + ", expected " + want); process.exit(1); }'
+          echo "tarball=$tgz" >> "$GITHUB_OUTPUT"
+          echo "verified $EXPECTED_NAME@$EXPECTED_VERSION sha256=$sha"
+
+      - name: Publish (Trusted Publishing + provenance)
+        env:
+          TARBALL: ${{ steps.verify.outputs.tarball }}
+          DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+        run: npm publish "$TARBALL" --provenance --access public --tag "$DIST_TAG" --ignore-scripts --registry https://registry.npmjs.org/

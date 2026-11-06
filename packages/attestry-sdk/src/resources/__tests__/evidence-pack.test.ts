@@ -19,6 +19,7 @@ import {
   type SupersedeEvidencePackResponse,
 } from "../evidence-pack.js";
 import type { FetchLike } from "../../types.js";
+import { trackTimersWithDelay } from "../../__tests__/timer-tracker.js";
 
 // ─── evidencePack resource — POST create / GET get / GET list / POST addBundle
 //
@@ -4537,5 +4538,184 @@ describe("evidencePack — P1.8 Round 4 coverage closure", () => {
       client.evidencePack.export({ packId: "", format: "json" }),
     ).toThrowError(/`packId` must be a non-empty string/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// evidencePack.export — body-covering timeout (0.8.0)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 0.7.0 routed export through the stream transport with NO timeout: a server
+// or proxy that stalled (before the headers, or mid-zip) hung the call — and
+// the consumer's body read — forever unless the caller wired up a signal.
+// 0.8.0 applies a deadline to the request AND to the consumer's read of the
+// returned body, defaulting to 120_000ms (2× the route's 60s maxDuration).
+// Precedence: per-call options.timeoutMs → explicit client timeoutMs →
+// 120_000.
+
+describe("evidencePack.export — timeout covers the download (0.8.0)", () => {
+  function clientWith(fetchImpl: FetchLike, timeoutMs?: number) {
+    return new AttestryClient({
+      apiKey: "k",
+      fetch: fetchImpl,
+      baseUrl: "https://test.attestry.local",
+      retry: { maxRetries: 0 },
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+  }
+
+  /** A fetch that never answers but honours its abort signal. */
+  const hungFetch: FetchLike = (_url, init) =>
+    new Promise((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+    });
+
+  /** A zip export that sends its first bytes and then stalls forever. */
+  function stalledZip(): { response: Response; canceled: () => boolean } {
+    let canceled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array([0x50, 0x4b, 0x03, 0x04])); // "PK\x03\x04"
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    return {
+      response: new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "application/zip" },
+      }),
+      canceled: () => canceled,
+    };
+  }
+
+  /** Rejects with "TEST-DEADLINE" if `p` has not settled within `ms`. */
+  function within<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([
+      p.finally(() => clearTimeout(timer)),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("TEST-DEADLINE")), ms);
+      }),
+    ]);
+  }
+
+  it("a zip body that stalls mid-download → reading it rejects with AttestryError('request timed out')", async () => {
+    const { response, canceled } = stalledZip();
+    // The fetch ignores its signal after the headers — the SDK must still
+    // enforce the deadline on the body the consumer reads.
+    const result = await clientWith(async () => response, 300).evidencePack.export({
+      packId: VALID_PACK_ID,
+      format: "zip",
+    });
+    expect(result.response.bodyUsed).toBe(false);
+    const err = await within(
+      result.response.arrayBuffer().catch((e: unknown) => e),
+      3_000,
+    );
+    expect(err).toBeInstanceOf(AttestryError);
+    expect(err).not.toBeInstanceOf(AttestryAPIError);
+    expect((err as AttestryError).message).toBe("request timed out");
+    // The underlying body was canceled (connection released).
+    expect(canceled()).toBe(true);
+  });
+
+  it("a server that never sends headers → AttestryError('request timed out')", async () => {
+    const err = await within(
+      clientWith(hungFetch, 200)
+        .evidencePack.export({ packId: VALID_PACK_ID, format: "pdf" })
+        .catch((e: unknown) => e),
+      3_000,
+    );
+    expect(err).toBeInstanceOf(AttestryError);
+    expect((err as AttestryError).message).toBe("request timed out");
+  });
+
+  it("the caller's signal still aborts a stalled download after the headers → 'request aborted by caller'", async () => {
+    const { response } = stalledZip();
+    const ac = new AbortController();
+    const result = await clientWith(async () => response).evidencePack.export(
+      { packId: VALID_PACK_ID, format: "zip" },
+      { signal: ac.signal },
+    );
+    setTimeout(() => ac.abort(), 50);
+    const err = await within(
+      result.response.arrayBuffer().catch((e: unknown) => e),
+      3_000,
+    );
+    expect(err).toBeInstanceOf(AttestryError);
+    expect((err as AttestryError).message).toBe("request aborted by caller");
+  });
+
+  it("default client: a hung export is still running at 60s and times out at 120s (not the 30s client default)", async () => {
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      let error: unknown;
+      clientWith(hungFetch)
+        .evidencePack.export({ packId: VALID_PACK_ID, format: "zip" })
+        .then(
+          () => {
+            settled = true;
+          },
+          (e: unknown) => {
+            settled = true;
+            error = e;
+          },
+        );
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(120_000 - 60_001);
+      expect(settled).toBe(true);
+      expect(error).toBeInstanceOf(AttestryError);
+      expect((error as AttestryError).message).toBe("request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a complete json export reads normally and releases the timer only after the body is read", async () => {
+    const timers = trackTimersWithDelay(47_111);
+    try {
+      const result = await clientWith(
+        async () =>
+          new Response(JSON.stringify(MOCK_EXPORT_JSON_ARTIFACT), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Disposition": EXPORT_CONTENT_DISPOSITION,
+            },
+          }),
+        47_111,
+      ).evidencePack.export({ packId: VALID_PACK_ID, format: "json" });
+      expect(result.contentDisposition).toBe(EXPORT_CONTENT_DISPOSITION);
+      const armed = timers.armed();
+      expect(armed).toHaveLength(1);
+      expect(timers.isCleared(armed[0])).toBe(false);
+      expect(await result.response.json()).toEqual(MOCK_EXPORT_JSON_ARTIFACT);
+      expect(timers.isCleared(armed[0])).toBe(true);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("per-call options.timeoutMs overrides the default; 0 disables it (Response handed through untouched)", async () => {
+    const err = await within(
+      clientWith(hungFetch)
+        .evidencePack.export({ packId: VALID_PACK_ID, format: "json" }, { timeoutMs: 50 })
+        .catch((e: unknown) => e),
+      3_000,
+    );
+    expect((err as AttestryError).message).toBe("request timed out");
+
+    const original = new Response(JSON.stringify(MOCK_EXPORT_JSON_ARTIFACT), {
+      headers: { "Content-Type": "application/json" },
+    });
+    const result = await clientWith(async () => original).evidencePack.export(
+      { packId: VALID_PACK_ID, format: "json" },
+      { timeoutMs: 0 },
+    );
+    expect(result.response).toBe(original);
   });
 });

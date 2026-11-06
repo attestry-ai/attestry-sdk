@@ -8,6 +8,9 @@ import type {
   AbacCondition,
 } from "../abac-policies.js";
 import type { FetchLike } from "../../types.js";
+// The public entry point, from SOURCE (not `dist/`): the suite must not
+// depend on a prior build or on whatever stale `dist/` is on disk.
+import * as sdkPublicApi from "../../index.js";
 
 // ─── abacPolicies.create — POST a new ABAC policy ──────────────────────────
 //
@@ -1492,10 +1495,7 @@ describe("abacPolicies.create — hostile round (residual gaps)", () => {
     // Pin the freeze observably — a push attempt throws TypeError
     // in strict mode (TS-emitted modules are strict by default).
     expect(() => {
-      // Import via dynamic-require so the test runs even if the
-      // top-level import had a fresh `as readonly [...]` cast.
-      const sdk = require("../../../dist/index.js");
-      (sdk.ABAC_POLICY_RESOURCES as unknown as string[]).push("evil-resource");
+      (sdkPublicApi.ABAC_POLICY_RESOURCES as unknown as string[]).push("evil-resource");
     }).toThrowError(TypeError);
   });
 });

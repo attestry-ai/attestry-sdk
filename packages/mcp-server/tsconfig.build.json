@@ -1,0 +1,5 @@
+{
+  "//": "KE2 P1.5 close-out (R-3): build config that excludes test files from the dist/ artifact. `npm run build` / `npm run dev` use this; a bare `tsc --noEmit` still uses tsconfig.json and type-checks the tests.",
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**"]
+}

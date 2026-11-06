@@ -53,7 +53,7 @@ export type SecuredDocument<T extends JsonLdDocument = JsonLdDocument> = T & {
 export interface SignOptions {
   /** Raw 32-byte Ed25519 secret key. */
   privateKey: Uint8Array;
-  /** e.g. `https://attestry.ai/.well-known/keys#key-2026-05`. */
+  /** e.g. `https://regseal.ai/.well-known/keys#key-2026-06`. */
   verificationMethod: string;
   /** ISO-8601 `created`; injectable for deterministic tests. Defaults to now (seconds precision). */
   created?: string;

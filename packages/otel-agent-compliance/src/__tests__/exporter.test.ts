@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AttestryDecisionExporter } from "../exporter.js";
+import { sanitizePII } from "../sanitizer.js";
 import { __test__ as exporterTest } from "../exporter.js";
-import { makeReadableSpan, makeSpan } from "./fakes.js";
+import { kernelBulkResponse, makeReadableSpan, makeSpan } from "./fakes.js";
 import type { ExporterLogger } from "../types.js";
 
 const VALID_CONFIG = {
@@ -35,10 +37,8 @@ function captureFetch(): FetchCapture[] {
     .fn()
     .mockImplementation(async (url: string, init?: RequestInit) => {
       captured.push({ url, init });
-      return new Response(
-        JSON.stringify({ totalInserted: 1, totalFailed: 0 }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      const items = JSON.parse(init?.body as string).items as unknown[];
+      return kernelBulkResponse({ submitted: items.length });
     });
   return captured;
 }
@@ -306,7 +306,7 @@ describe("AttestryDecisionExporter — batching", () => {
       logger.warns.some((w) => w.msg.includes("Queue cap hit")),
     ).toBe(true);
 
-    resolveFetch(new Response("{}", { status: 200 }));
+    resolveFetch(kernelBulkResponse({ submitted: 1 }));
     await ex.shutdown();
   });
 });
@@ -449,6 +449,70 @@ describe("AttestryDecisionExporter — spanToDecision", () => {
     const a = JSON.parse(captured[0]?.init?.body as string).items[0];
     const b = JSON.parse(captured[1]?.init?.body as string).items[0];
     expect(a.inputDigest).toBe(b.inputDigest);
+    await ex.shutdown();
+  });
+});
+
+// ─── 0.2.0: digest contract — digests cover the REDACTED input ─────
+
+describe("AttestryDecisionExporter — digest covers redacted input", () => {
+  let captured: FetchCapture[];
+  beforeEach(() => {
+    captured = captureFetch();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const sha = (s: string) =>
+    `sha256:${createHash("sha256").update(s, "utf8").digest("hex")}`;
+
+  it("inputDigest/outputDigest = sha256 of the sanitized value, never of the raw value", async () => {
+    const rawInput = "approve refund to alice@example.com";
+    const rawOutput = "charged card 4111 1111 1111 1111";
+    const ex = new AttestryDecisionExporter({
+      ...VALID_CONFIG,
+      batchSize: 1,
+      batchInterval: 999_999,
+    });
+    ex.onEnd(
+      makeReadableSpan({
+        name: "tool.call",
+        attributes: { "tool.name": "refund", input: rawInput, output: rawOutput },
+      }),
+    );
+    await ex.forceFlush();
+    const wire = captured[0]?.init?.body as string;
+    const item = JSON.parse(wire).items[0];
+
+    const redacted = sanitizePII({ input: rawInput, output: rawOutput });
+    expect(redacted.input).toBe("approve refund to [REDACTED]");
+    // The digest an auditor recomputes = sha256(stableStringify(sanitize(raw).input)).
+    expect(item.inputDigest).toBe(sha(JSON.stringify(redacted.input)));
+    expect(item.outputDigest).toBe(sha(JSON.stringify(redacted.output)));
+    // ...and it is NOT a fingerprint of the raw PII.
+    expect(item.inputDigest).not.toBe(sha(JSON.stringify(rawInput)));
+    expect(item.outputDigest).not.toBe(sha(JSON.stringify(rawOutput)));
+    expect(wire).not.toContain("alice@example.com");
+    expect(wire).not.toContain("4111");
+    await ex.shutdown();
+  });
+
+  it("a custom sanitizer's output is what gets hashed", async () => {
+    const ex = new AttestryDecisionExporter({
+      ...VALID_CONFIG,
+      batchSize: 1,
+      batchInterval: 999_999,
+      sanitizer: (attrs) => ({ ...attrs, input: "tokenised-input" }),
+    });
+    ex.onEnd(
+      makeReadableSpan({
+        name: "tool.call",
+        attributes: { "tool.name": "x", input: "raw secret value" },
+      }),
+    );
+    await ex.forceFlush();
+    const item = JSON.parse(captured[0]?.init?.body as string).items[0];
+    expect(item.inputDigest).toBe(sha(JSON.stringify("tokenised-input")));
+    expect(item.inputDigest).not.toBe(sha(JSON.stringify("raw secret value")));
     await ex.shutdown();
   });
 });
@@ -839,11 +903,7 @@ describe("AttestryDecisionExporter — flush reentrancy", () => {
             };
           } else {
             fetchOrder.push(myCall);
-            resolve(
-              new Response(JSON.stringify({ totalInserted: 1 }), {
-                status: 200,
-              }),
-            );
+            resolve(kernelBulkResponse({ submitted: 1 }));
           }
         });
       },
@@ -878,9 +938,7 @@ describe("AttestryDecisionExporter — flush reentrancy", () => {
     );
 
     // Now release the first fetch.
-    resolveFirst(
-      new Response(JSON.stringify({ totalInserted: 1 }), { status: 200 }),
-    );
+    resolveFirst(kernelBulkResponse({ submitted: 1 }));
 
     await ex.shutdown();
     // Both batches were flushed, separately — no double-send.

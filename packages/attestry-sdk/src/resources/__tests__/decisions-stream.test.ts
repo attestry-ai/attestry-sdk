@@ -1101,3 +1101,94 @@ describe("decisions.stream — hostile review #3: throwing-getter MEDIUM-1 fix",
     expect(calls).toHaveLength(0);
   });
 });
+
+// ─── 0.8.0 P1-6: several SSE frames per network chunk ──────────────────────
+//
+// The 0.6.0–0.7.0 SSE parser used a module-level `g`-flag regex whose
+// `lastIndex` leaked between `exec` calls on a re-sliced buffer. Through
+// the public API that meant: frames coalesced into one TCP read were
+// merged (→ "SSE frame data was not valid JSON") and a stream opened after
+// another was abandoned mid-chunk could hang. Every other test in this
+// file delivers ONE frame per chunk, which masked the bug.
+
+describe("decisions.stream — several frames per network chunk (0.8.0 P1-6)", () => {
+  const SAMPLE_EVENT_3 = {
+    ...SAMPLE_EVENT_2,
+    id: "44444444-4444-4444-4444-444444444444",
+    sequenceNumber: 3,
+    // Longer than either other frame: worst case for a stale lastIndex.
+    recordHash: "sha256:" + "4".repeat(64),
+    prevRecordHash: SAMPLE_EVENT_2.recordHash,
+  };
+  const LONG_CURSOR = CURSOR_2 + "x".repeat(120);
+
+  it("yields all three events when [long, short, longer] arrive in ONE chunk", async () => {
+    const { client } = makeMockedClientForStream([
+      {
+        chunks: [
+          frame(CURSOR_2, SAMPLE_EVENT_2) +
+            frame(CURSOR_1, SAMPLE_EVENT_1) +
+            frame(LONG_CURSOR, SAMPLE_EVENT_3),
+        ],
+      },
+    ]);
+    const seqs: number[] = [];
+    for await (const event of client.decisions.stream()) {
+      seqs.push(event.sequenceNumber);
+    }
+    expect(seqs).toEqual([2, 1, 3]);
+  });
+
+  it("a new stream opened after an early `break` still receives its first event", async () => {
+    const enc = new TextEncoder();
+    let liveController!: ReadableStreamDefaultController<Uint8Array>;
+    const responses: Array<() => Response> = [
+      // Stream 1: two frames in one chunk; the consumer breaks after one.
+      () =>
+        makeSSEStreamResponse([
+          frame(LONG_CURSOR, SAMPLE_EVENT_2) + frame(CURSOR_1, SAMPLE_EVENT_1),
+        ]),
+      // Stream 2: one short frame on a connection that stays OPEN.
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              liveController = c;
+              c.enqueue(enc.encode(frame(CURSOR_1, SAMPLE_EVENT_1)));
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ),
+    ];
+    let i = 0;
+    const client = new AttestryClient({
+      apiKey: "k",
+      baseUrl: "https://test.attestry.local",
+      retry: { maxRetries: 0 },
+      fetch: (async () => responses[i++]()) as FetchLike,
+    });
+
+    for await (const _ of client.decisions.stream()) break;
+
+    const it = client.decisions.stream()[Symbol.asyncIterator]();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const next = await Promise.race([
+        it.next(),
+        new Promise<"TIMEOUT">((r) => {
+          timer = setTimeout(() => r("TIMEOUT"), 1_000);
+        }),
+      ]);
+      expect(next).not.toBe("TIMEOUT");
+      expect((next as IteratorResult<DecisionStreamEvent>).value?.sequenceNumber).toBe(1);
+    } finally {
+      clearTimeout(timer);
+      try {
+        liveController.close();
+      } catch {
+        // already closed
+      }
+      await it.return?.();
+    }
+  });
+});

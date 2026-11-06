@@ -257,3 +257,121 @@ describe("annexIv.generate — typed error branches (AttestryAPIError w/ status 
     expect(err).not.toBeInstanceOf(AttestryAPIError);
   });
 });
+
+// ─── 0.8.0 P2-10: generate defaults to a 300s timeout ──────────────────────
+//
+// The route's `maxDuration` is 300s. Under 0.7.0 the client-wide 30s
+// default aborted `generate` while the server kept working — and the
+// natural retry then failed 422 `annex_iv.already_bound` (metered). 0.8.0
+// gives `generate` its own 300_000ms default. Precedence: per-call
+// `options.timeoutMs` → explicit client `timeoutMs` → 300_000.
+
+describe("annexIv.generate — per-method default timeout (0.8.0 P2-10)", () => {
+  /** A client whose fetch never answers but honours its abort signal. */
+  function hungClient(timeoutMs?: number) {
+    const mockFetch: FetchLike = (_url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    return new AttestryClient({
+      apiKey: "k",
+      fetch: mockFetch,
+      baseUrl: "https://test.attestry.local",
+      retry: { maxRetries: 0 },
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+  }
+
+  function track<T>(p: Promise<T>) {
+    const state: { settled: boolean; error: unknown } = { settled: false, error: undefined };
+    p.then(
+      () => {
+        state.settled = true;
+      },
+      (e: unknown) => {
+        state.settled = true;
+        state.error = e;
+      },
+    );
+    return state;
+  }
+
+  it("default client: still running at 30s and 299.9s, times out at 300s", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = track(hungClient().annexIv.generate({ technicalFileId: VALID_UUID }));
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(s.settled).toBe(false); // 0.7.0 aborted here
+      await vi.advanceTimersByTimeAsync(299_900 - 30_001);
+      expect(s.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(s.settled).toBe(true);
+      expect(s.error).toBeInstanceOf(AttestryError);
+      expect((s.error as AttestryError).message).toBe("request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the 300s default is scoped to generate — getBind keeps the 30s default", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = track(hungClient().annexIv.getBind({ technicalFileId: VALID_UUID }));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(s.settled).toBe(true);
+      expect((s.error as AttestryError).message).toBe("request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an explicit client-wide timeoutMs wins over the method default", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = track(hungClient(10_000).annexIv.generate({ technicalFileId: VALID_UUID }));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(s.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(s.settled).toBe(true);
+      expect((s.error as AttestryError).message).toBe("request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("client timeoutMs: 0 still disables the timeout for generate", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = track(hungClient(0).annexIv.generate({ technicalFileId: VALID_UUID }));
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(s.settled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a per-call options.timeoutMs wins over both (shorter and longer)", async () => {
+    vi.useFakeTimers();
+    try {
+      const shorter = track(
+        hungClient().annexIv.generate({ technicalFileId: VALID_UUID }, { timeoutMs: 1_000 }),
+      );
+      const longer = track(
+        hungClient(10_000).annexIv.generate(
+          { technicalFileId: VALID_UUID },
+          { timeoutMs: 600_000 },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(shorter.settled).toBe(true);
+      expect((shorter.error as AttestryError).message).toBe("request timed out");
+      await vi.advanceTimersByTimeAsync(598_999);
+      expect(longer.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(longer.settled).toBe(true);
+      expect((longer.error as AttestryError).message).toBe("request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

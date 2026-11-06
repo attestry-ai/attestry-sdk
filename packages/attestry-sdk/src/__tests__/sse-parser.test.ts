@@ -108,22 +108,18 @@ describe("parseFrameBlock — field parsing edge cases (coverage)", () => {
 
 describe("FRAME_BOUNDARY regex (coverage)", () => {
   it("matches \\n\\n (LF LF)", () => {
-    FRAME_BOUNDARY.lastIndex = 0;
     expect(FRAME_BOUNDARY.exec("a\n\nb")?.[0]).toBe("\n\n");
   });
 
   it("matches \\r\\n\\r\\n (CRLF CRLF)", () => {
-    FRAME_BOUNDARY.lastIndex = 0;
     expect(FRAME_BOUNDARY.exec("a\r\n\r\nb")?.[0]).toBe("\r\n\r\n");
   });
 
   it("matches \\r\\r (CR CR — old Mac)", () => {
-    FRAME_BOUNDARY.lastIndex = 0;
     expect(FRAME_BOUNDARY.exec("a\r\rb")?.[0]).toBe("\r\r");
   });
 
   it("does NOT match a single newline (frame separator requires blank line)", () => {
-    FRAME_BOUNDARY.lastIndex = 0;
     expect(FRAME_BOUNDARY.exec("a\nb")).toBeNull();
   });
 });
@@ -180,11 +176,7 @@ describe("parseSSE — back-to-back frame boundaries (coverage)", () => {
     // Defensive: when the buffer starts with a frame boundary (`\n\n`
     // before any field lines), the parser's first match yields a
     // zero-length block. The `if (block.length === 0) continue;`
-    // branch skips it. (Note: the regex's `g`-flag lastIndex carries
-    // across exec calls, so the empty-block branch is reachable
-    // primarily at the START of the buffer — this test pins that
-    // case.)
-    FRAME_BOUNDARY.lastIndex = 0; // defensive — clear carry from prior tests
+    // branch skips it.
     const enc = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -355,5 +347,115 @@ describe("parseSSE — BOM strip survives empty first reads (cross-phase fix)", 
     expect(frames).toHaveLength(1);
     expect(frames[0].id).toBe("c-2");
     expect(frames[0].data).toBe("x");
+  });
+});
+
+// ─── 0.8.0 P1-6: frame-boundary regex must not carry state ────────────────
+//
+// 0.6.0–0.7.0 declared `FRAME_BOUNDARY` with the `g` flag at module scope
+// and called `.exec(buffer)` on a buffer that is re-sliced after every
+// match. A global regex resumes at its (shared, module-level) `lastIndex`,
+// so (a) several frames coalesced into ONE network chunk were skipped /
+// merged, and (b) a stream abandoned mid-chunk (consumer `break`) left a
+// stale `lastIndex` that made the NEXT stream in the process miss its
+// frame boundary and hang. These pins fail on the `g`-flag regex.
+
+import { parseSSEResponse, type SSEFrame } from "../sse-parser.js";
+
+function sseFrame(id: string, data: string): string {
+  return `id: ${id}\nevent: t\ndata: ${data}\n\n`;
+}
+
+function sseResponse(
+  chunks: string[],
+  opts: { keepOpen?: boolean } = {},
+): { response: Response; close: () => void } {
+  const enc = new TextEncoder();
+  let ctl!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      ctl = controller;
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      if (!opts.keepOpen) controller.close();
+    },
+  });
+  return {
+    response: new Response(stream, {
+      headers: { "Content-Type": "text/event-stream" },
+    }),
+    close: () => {
+      try {
+        ctl.close();
+      } catch {
+        // already closed / canceled
+      }
+    },
+  };
+}
+
+describe("parseSSE — frame-boundary regex is stateless (0.8.0 P1-6)", () => {
+  it("FRAME_BOUNDARY is neither global nor sticky (no shared lastIndex)", () => {
+    expect(FRAME_BOUNDARY.global).toBe(false);
+    expect(FRAME_BOUNDARY.sticky).toBe(false);
+  });
+
+  it("yields all three frames when they arrive coalesced in ONE chunk (long, short, longer)", async () => {
+    const long = sseFrame("c-1", JSON.stringify({ n: 1, pad: "x".repeat(80) }));
+    const short = sseFrame("c-2", JSON.stringify({ n: 2 }));
+    const longer = sseFrame("c-3", JSON.stringify({ n: 3, pad: "y".repeat(200) }));
+    const { response } = sseResponse([long + short + longer]);
+    const out: SSEFrame[] = [];
+    for await (const f of parseSSEResponse(response)) out.push(f);
+    expect(out.map((f) => f.id)).toEqual(["c-1", "c-2", "c-3"]);
+    expect(out.map((f) => (JSON.parse(f.data) as { n: number }).n)).toEqual([1, 2, 3]);
+  });
+
+  it("parses many frames of DECREASING length in one chunk, then a split frame", async () => {
+    // Decreasing lengths are the worst case for a stale lastIndex: each
+    // next frame's boundary sits BEFORE the previous match's end.
+    const frames = Array.from({ length: 10 }, (_, i) =>
+      sseFrame(`c-${i}`, JSON.stringify({ n: i, pad: "z".repeat((10 - i) * 7) })),
+    );
+    const tail = sseFrame("c-tail", JSON.stringify({ n: 99 }));
+    const { response } = sseResponse([
+      frames.join("") + tail.slice(0, 9),
+      tail.slice(9),
+    ]);
+    const out: SSEFrame[] = [];
+    for await (const f of parseSSEResponse(response)) out.push(f);
+    expect(out.map((f) => f.id)).toEqual([
+      ...frames.map((_, i) => `c-${i}`),
+      "c-tail",
+    ]);
+  });
+
+  it("a NEW stream after an early `break` still emits its first frame (no cross-stream state)", async () => {
+    // Stream 1: two frames (long, then short) in one chunk; abandon after
+    // the first frame. With the `g`-flag bug this left lastIndex at the
+    // length of the long frame.
+    const first = sseResponse([
+      sseFrame("a-1", JSON.stringify({ pad: "x".repeat(200) })) +
+        sseFrame("a-2", "{}"),
+    ]);
+    for await (const _ of parseSSEResponse(first.response)) break;
+
+    // Stream 2: one SHORT frame, connection stays open (a live stream).
+    const second = sseResponse([sseFrame("b-1", "{}")], { keepOpen: true });
+    const it = parseSSEResponse(second.response)[Symbol.asyncIterator]();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const next = await Promise.race([
+        it.next(),
+        new Promise<"TIMEOUT">((r) => {
+          timer = setTimeout(() => r("TIMEOUT"), 1_000);
+        }),
+      ]);
+      expect(next).not.toBe("TIMEOUT");
+      expect((next as IteratorResult<SSEFrame>).value?.id).toBe("b-1");
+    } finally {
+      clearTimeout(timer);
+      second.close();
+      await it.return?.();
+    }
   });
 });

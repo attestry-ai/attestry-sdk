@@ -10,7 +10,7 @@
  * const sdk = new NodeSDK({
  *   spanProcessors: [
  *     new AttestryDecisionExporter({
- *       apiUrl: "https://attestry.app/api/v1/decisions/bulk",
+ *       apiUrl: "https://attestry.ai/api/v1/decisions/bulk",
  *       apiKey: process.env.ATTESTRY_API_KEY!,
  *       systemId: process.env.ATTESTRY_SYSTEM_ID!,
  *     }),
@@ -26,6 +26,7 @@
 
 export { AttestryDecisionExporter } from "./exporter.js";
 export { AttestryClient } from "./client.js";
+export type { BatchRecordFailure, BatchSendResult } from "./client.js";
 export { sanitizePII } from "./sanitizer.js";
 export { tagWithFrameworks } from "./framework-tagger.js";
 export type {
@@ -33,6 +34,9 @@ export type {
   DecisionInput,
   ExporterLogger,
   FrameworkClaim,
+  ReadableSpanLike,
   SpanFrameworkContext,
+  SpanLike,
+  SpanProcessorLike,
   ToolInvocation,
 } from "./types.js";
